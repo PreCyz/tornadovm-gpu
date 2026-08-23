@@ -1,0 +1,4 @@
+interface:
+  display_name: "Use PowerShell"
+  short_description: "Prefer pwsh for command-line operations"
+  default_prompt: "Use $use-powershell to run command-line work through PowerShell by default."

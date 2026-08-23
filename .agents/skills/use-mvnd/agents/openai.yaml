@@ -1,0 +1,4 @@
+interface:
+  display_name: "Use Maven Daemon"
+  short_description: "Prefer mvnd with automatic mvn fallback"
+  default_prompt: "Use $use-mvnd for Maven commands, preferring mvnd when available."

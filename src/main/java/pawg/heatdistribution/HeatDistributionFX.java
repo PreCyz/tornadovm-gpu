@@ -1,0 +1,178 @@
+package pawg.heatdistribution;
+
+import javafx.animation.AnimationTimer;
+import javafx.application.Application;
+import javafx.scene.Scene;
+import javafx.scene.image.*;
+import javafx.scene.input.MouseEvent;
+import javafx.scene.layout.StackPane;
+import javafx.scene.paint.Color;
+import javafx.stage.Stage;
+import uk.ac.manchester.tornado.api.TaskGraph;
+import uk.ac.manchester.tornado.api.TornadoExecutionPlan;
+import uk.ac.manchester.tornado.api.annotations.Parallel;
+import uk.ac.manchester.tornado.api.enums.DataTransferMode;
+
+public class HeatDistributionFX extends Application {
+
+    private static final int DIM = 512;
+    private static final float ALPHA = 0.15f; // Stable diffusion coefficient.
+    private static final int STEPS_PER_FRAME = 20; // Number of steps computed per frame.
+    private static final int BRUSH_RADIUS = 12;
+
+    private final float[] gridA = new float[DIM * DIM];
+    private final float[] gridB = new float[DIM * DIM];
+
+    private TornadoExecutionPlan planAtoB;
+    private TornadoExecutionPlan planBtoA;
+
+    private PixelWriter pixelWriter;
+    private final int[] pixelBuffer = new int[DIM * DIM];
+
+    private boolean isMouseDown = false;
+    private double mouseX = -1;
+    private double mouseY = -1;
+
+    public static void computeHeatStep(float[] current, float[] next, int dim, float alpha) {
+        for (@Parallel int i = 1; i < dim - 1; i++) {
+            for (@Parallel int j = 1; j < dim - 1; j++) {
+                int idx = i * dim + j;
+                int top = (i - 1) * dim + j;
+                int bottom = (i + 1) * dim + j;
+                int left = i * dim + (j - 1);
+                int right = i * dim + (j + 1);
+
+                next[idx] = current[idx] + alpha * (
+                        current[top] + current[bottom] +
+                                current[left] + current[right] -
+                                4.0f * current[idx]
+                );
+            }
+        }
+    }
+
+    @Override
+    public void start(Stage primaryStage) {
+        initHeatSources();
+
+        // Create two separate execution plans for buffer swapping (A->B and B->A).
+        TaskGraph tgAtoB = new TaskGraph("tgAtoB")
+                .transferToDevice(DataTransferMode.EVERY_EXECUTION, gridA)
+                .task("taskAtoB", HeatDistributionFX::computeHeatStep, gridA, gridB, DIM, ALPHA)
+                .transferToHost(DataTransferMode.EVERY_EXECUTION, gridB);
+        planAtoB = new TornadoExecutionPlan(tgAtoB.snapshot());
+
+        TaskGraph tgBtoA = new TaskGraph("tgBtoA")
+                .transferToDevice(DataTransferMode.EVERY_EXECUTION, gridB)
+                .task("taskBtoA", HeatDistributionFX::computeHeatStep, gridB, gridA, DIM, ALPHA)
+                .transferToHost(DataTransferMode.EVERY_EXECUTION, gridA);
+        planBtoA = new TornadoExecutionPlan(tgBtoA.snapshot());
+
+        WritableImage writableImage = new WritableImage(DIM, DIM);
+        pixelWriter = writableImage.getPixelWriter();
+        ImageView imageView = new ImageView(writableImage);
+
+        imageView.setFitWidth(800);
+        imageView.setFitHeight(800);
+        imageView.setPreserveRatio(true);
+
+        imageView.setOnMousePressed(this::handleMouseEvent);
+        imageView.setOnMouseDragged(this::handleMouseEvent);
+        imageView.setOnMouseReleased(_ -> isMouseDown = false);
+
+        StackPane root = new StackPane(imageView);
+        Scene scene = new Scene(root, 800, 800, Color.BLACK);
+
+        primaryStage.setTitle("Heat distribution");
+        primaryStage.setScene(scene);
+        primaryStage.show();
+
+        AnimationTimer timer = new AnimationTimer() {
+            private boolean useAtoB = true;
+
+            @Override
+            public void handle(long now) {
+                if (isMouseDown) {
+                    injectHeatAtMouse(imageView);
+                }
+
+                // Execute several simulation substeps per frame for a smooth effect.
+                for (int step = 0; step < STEPS_PER_FRAME; step++) {
+                    if (useAtoB) {
+                        planAtoB.execute();
+                    } else {
+                        planBtoA.execute();
+                    }
+                    useAtoB = !useAtoB;
+                }
+
+                updateImageView(useAtoB ? gridA : gridB);
+            }
+        };
+        timer.start();
+    }
+
+    private void handleMouseEvent(MouseEvent event) {
+        isMouseDown = true;
+        mouseX = event.getX();
+        mouseY = event.getY();
+    }
+
+    private void injectHeatAtMouse(ImageView imageView) {
+        double scaleX = DIM / imageView.getBoundsInLocal().getWidth();
+        double scaleY = DIM / imageView.getBoundsInLocal().getHeight();
+
+        int gridX = (int) (mouseX * scaleX);
+        int gridY = (int) (mouseY * scaleY);
+
+        for (int i = -BRUSH_RADIUS; i <= BRUSH_RADIUS; i++) {
+            for (int j = -BRUSH_RADIUS; j <= BRUSH_RADIUS; j++) {
+                int py = gridY + i;
+                int px = gridX + j;
+
+                if (px > 0 && px < DIM - 1 && py > 0 && py < DIM - 1) {
+                    if (i * i + j * j <= BRUSH_RADIUS * BRUSH_RADIUS) {
+                        gridA[py * DIM + px] = 100.0f;
+                        gridB[py * DIM + px] = 100.0f;
+                    }
+                }
+            }
+        }
+    }
+
+    private void initHeatSources() {
+        int cx = DIM / 2;
+        int cy = DIM / 2;
+        int r = 25;
+        for (int i = cx - r; i <= cx + r; i++) {
+            for (int j = cy - r; j <= cy + r; j++) {
+                if ((i - cx) * (i - cx) + (j - cy) * (j - cy) <= r * r) {
+                    gridA[i * DIM + j] = 100.0f;
+                    gridB[i * DIM + j] = 100.0f;
+                }
+            }
+        }
+    }
+
+    private void updateImageView(float[] activeGrid) {
+        for (int i = 0; i < DIM * DIM; i++) {
+            float temp = Math.clamp(activeGrid[i], 0.0f, 100.0f);
+            float norm = temp / 100.0f;
+
+            // Smooth temperature gradient: black -> blue -> red -> yellow -> white.
+            int r = (int) (Math.clamp(norm * 2.0f - 0.5f, 0.0f, 1.0f) * 255);
+            int g = (int) (Math.clamp(norm * 3.0f - 2.0f, 0.0f, 1.0f) * 255);
+            int b = (int) (Math.clamp(1.0f - norm * 2.0f, 0.0f, 1.0f) * 255);
+
+            pixelBuffer[i] = (0xFF << 24) | (r << 16) | (g << 8) | b;
+        }
+
+        pixelWriter.setPixels(0, 0, DIM, DIM,
+                javafx.scene.image.PixelFormat.getIntArgbInstance(),
+                pixelBuffer, 0, DIM);
+    }
+
+    static void main(String[] args) {
+        launch(args);
+    }
+}
