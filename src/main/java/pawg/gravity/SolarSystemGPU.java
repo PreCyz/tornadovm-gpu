@@ -1,0 +1,269 @@
+package pawg.gravity;
+
+import javafx.animation.AnimationTimer;
+import javafx.application.Application;
+import javafx.scene.Scene;
+import javafx.scene.image.*;
+import javafx.scene.layout.StackPane;
+import javafx.scene.paint.Color;
+import javafx.stage.Stage;
+import uk.ac.manchester.tornado.api.*;
+import uk.ac.manchester.tornado.api.annotations.Parallel;
+import uk.ac.manchester.tornado.api.enums.DataTransferMode;
+import uk.ac.manchester.tornado.api.math.TornadoMath;
+
+public class SolarSystemGPU extends Application {
+
+    private static final int WIDTH = 880;
+    private static final int HEIGHT = 880;
+
+    // Promienie Orbit (Dopasowane do wysokości 880px, max orbit = 415px)
+    private static final float MERCURY_ORBIT = 55.0f;
+    private static final float VENUS_ORBIT   = 90.0f;
+    private static final float EARTH_ORBIT   = 130.0f;
+    private static final float MARS_ORBIT    = 175.0f;
+    private static final float JUPITER_ORBIT = 235.0f;
+    private static final float SATURN_ORBIT  = 300.0f;
+    private static final float URANUS_ORBIT  = 360.0f;
+    private static final float NEPTUNE_ORBIT = 415.0f;
+
+    private final int[] pixelBuffer = new int[WIDTH * HEIGHT];
+
+    // Tablica parametrów dla GPU:
+    // [0]=sunX, [1]=sunY,
+    // [2]=mercX, [3]=mercY, [4]=venusX, [5]=venusY,
+    // [6]=earthX, [7]=earthY, [8]=earthRot,
+    // [9]=marsX, [10]=marsY,
+    // [11]=jupX, [12]=jupY,
+    // [13]=satX, [14]=satY,
+    // [15]=uranX, [16]=uranY,
+    // [17]=nepX, [18]=nepY
+    private final float[] params = new float[19];
+
+    private TornadoExecutionPlan executionPlan;
+    private PixelWriter pixelWriter;
+
+    public static void renderSystemKernel(int[] output, float[] p, int width, int height) {
+        float sunX     = p[0];
+        float sunY     = p[1];
+        float mercX    = p[2];  float mercY    = p[3];
+        float venusX   = p[4];  float venusY   = p[5];
+        float earthX   = p[6];  float earthY   = p[7];  float earthRot = p[8];
+        float marsX    = p[9];  float marsY    = p[10];
+        float jupX     = p[11]; float jupY     = p[12];
+        float satX     = p[13]; float satY     = p[14];
+        float uranX    = p[15]; float uranY    = p[16];
+        float nepX     = p[17]; float nepY     = p[18];
+
+        // Promienie ciał (zmniejszone dla przejrzystości widoku)
+        float sunRSq   = 22.0f * 22.0f;
+        float mercRSq  = 3.0f  * 3.0f;
+        float venusRSq = 5.0f  * 5.0f;
+        float earthRSq = 6.0f  * 6.0f;
+        float marsRSq  = 4.0f  * 4.0f;
+        float jupRSq   = 13.0f * 13.0f;
+        float satRSq   = 10.0f * 10.0f;
+        float uranRSq  = 8.0f  * 8.0f;
+        float nepRSq   = 8.0f  * 8.0f;
+
+        for (@Parallel int y = 0; y < height; y++) {
+            for (@Parallel int x = 0; x < width; x++) {
+                int idx = y * width + x;
+
+                float dxSun = x - sunX; float dySun = y - sunY;
+                float distSunSq = dxSun * dxSun + dySun * dySun;
+
+                float distMercSq  = (x - mercX) * (x - mercX) + (y - mercY) * (y - mercY);
+                float distVenusSq = (x - venusX) * (x - venusX) + (y - venusY) * (y - venusY);
+                float distEarthSq = (x - earthX) * (x - earthX) + (y - earthY) * (y - earthY);
+                float distMarsSq  = (x - marsX) * (x - marsX) + (y - marsY) * (y - marsY);
+                float distJupSq   = (x - jupX) * (x - jupX) + (y - jupY) * (y - jupY);
+                float distSatSq   = (x - satX) * (x - satX) + (y - satY) * (y - satY);
+                float distUranSq  = (x - uranX) * (x - uranX) + (y - uranY) * (y - uranY);
+                float distNepSq   = (x - nepX) * (x - nepX) + (y - nepY) * (y - nepY);
+
+                // 1. Słońce + Poświata
+                if (distSunSq <= sunRSq) {
+                    output[idx] = 0xFFFFD700;
+                } else if (distSunSq < sunRSq * 2.0f) {
+                    float distSun = TornadoMath.sqrt(distSunSq);
+                    float glow = 1.0f - ((distSun - 22.0f) / 22.0f);
+                    int alpha = (int) (glow * 180.0f);
+                    output[idx] = (alpha << 24) | (255 << 16) | ((int) (200 * glow) << 8);
+                }
+                // 2. Merkury (Szary)
+                else if (distMercSq <= mercRSq) {
+                    output[idx] = 0xFFA0A0A0;
+                }
+                // 3. Wenus (Żółtawo-beżowy)
+                else if (distVenusSq <= venusRSq) {
+                    output[idx] = 0xFFE3BB76;
+                }
+                // 4. Ziemia (Niebieska z obracającym się lądem)
+                else if (distEarthSq <= earthRSq) {
+                    float localX = x - earthX;
+                    float localY = y - earthY;
+                    float rotX = localX * TornadoMath.cos(earthRot) - localY * TornadoMath.sin(earthRot);
+                    float rotY = localX * TornadoMath.sin(earthRot) + localY * TornadoMath.cos(earthRot);
+
+                    if ((rotX > -3.0f && rotX < 2.0f && rotY > -4.0f && rotY < 3.0f)) {
+                        output[idx] = 0xFF2E8B57;
+                    } else {
+                        output[idx] = 0xFF1E90FF;
+                    }
+                }
+                // 5. Mars (Czerwony / Rdzawy)
+                else if (distMarsSq <= marsRSq) {
+                    output[idx] = 0xFFC1440E;
+                }
+                // 6. Jowisz (Paski atmosferyczne)
+                else if (distJupSq <= jupRSq) {
+                    float localY = y - jupY;
+                    float band = TornadoMath.sin(localY * 0.6f);
+                    if (band > 0.2f) {
+                        output[idx] = 0xFFC87D55;
+                    } else {
+                        output[idx] = 0xFFE0C9A6;
+                    }
+                }
+                // 7. Saturn + Pierścienie
+                else if (distSatSq <= satRSq) {
+                    output[idx] = 0xFFE2C58F;
+                } else if (distSatSq >= satRSq * 1.6f && distSatSq <= satRSq * 4.5f) {
+                    float distSat = TornadoMath.sqrt(distSatSq);
+                    if (distSat > 14.0f && distSat < 19.0f) {
+                        output[idx] = 0xCCD4B27C; // Pierścień A/B
+                    } else if (distSat >= 19.0f && distSat <= 21.0f) {
+                        output[idx] = 0x10000000; // Przerwa Cassiniego
+                    } else if (distSat > 21.0f && distSat < 23.0f) {
+                        output[idx] = 0xAAAE9664; // Pierścień zewnętrzny
+                    } else {
+                        output[idx] = 0xFF020208;
+                    }
+                }
+                // 8. Uran (Jasnoniebieski / Turkusowy)
+                else if (distUranSq <= uranRSq) {
+                    output[idx] = 0xFF4FD0E7;
+                }
+                // 9. Neptun (Ciemnoniebieski)
+                else if (distNepSq <= nepRSq) {
+                    output[idx] = 0xFF274687;
+                }
+                // 10. Tło Kosmosu + Linie Orbit
+                else {
+                    float distSun = TornadoMath.sqrt(distSunSq);
+
+                    float diffMerc  = TornadoMath.abs(distSun - 55.0f);
+                    float diffVenus = TornadoMath.abs(distSun - 90.0f);
+                    float diffEarth = TornadoMath.abs(distSun - 130.0f);
+                    float diffMars  = TornadoMath.abs(distSun - 175.0f);
+                    float diffJup   = TornadoMath.abs(distSun - 235.0f);
+                    float diffSat   = TornadoMath.abs(distSun - 300.0f);
+                    float diffUran  = TornadoMath.abs(distSun - 360.0f);
+                    float diffNep   = TornadoMath.abs(distSun - 415.0f);
+
+                    if (diffMerc < 0.7f || diffVenus < 0.7f || diffEarth < 0.7f ||
+                            diffMars < 0.7f || diffJup < 0.7f   || diffSat < 0.7f   ||
+                            diffUran < 0.7f || diffNep < 0.7f) {
+                        output[idx] = 0x20FFFFFF; // Dyskretne linie orbit
+                    } else {
+                        output[idx] = 0xFF020208; // Czarny kosmos
+                    }
+                }
+            }
+        }
+    }
+
+    @Override
+    public void start(Stage primaryStage) {
+        float sunX = WIDTH / 2.0f;
+        float sunY = HEIGHT / 2.0f;
+
+        params[0] = sunX;
+        params[1] = sunY;
+
+        TaskGraph taskGraph = new TaskGraph("solarSystemGraph")
+                .transferToDevice(DataTransferMode.EVERY_EXECUTION, params)
+                .task("renderTask", SolarSystemGPU::renderSystemKernel, pixelBuffer, params, WIDTH, HEIGHT)
+                .transferToHost(DataTransferMode.EVERY_EXECUTION, pixelBuffer);
+
+        ImmutableTaskGraph immutableTaskGraph = taskGraph.snapshot();
+        executionPlan = new TornadoExecutionPlan(immutableTaskGraph);
+
+        WritableImage writableImage = new WritableImage(WIDTH, HEIGHT);
+        pixelWriter = writableImage.getPixelWriter();
+        ImageView imageView = new ImageView(writableImage);
+
+        StackPane root = new StackPane(imageView);
+        Scene scene = new Scene(root, WIDTH, HEIGHT, Color.BLACK);
+
+        primaryStage.setTitle("TornadoVM + JavaFX: Pełny Układ Słoneczny (8 Planet)");
+        primaryStage.setScene(scene);
+        primaryStage.show();
+
+        AnimationTimer timer = new AnimationTimer() {
+            private float mercAngle  = 0.0f;
+            private float venusAngle = 0.0f;
+            private float earthAngle = 0.0f;
+            private float earthRotation = 0.0f;
+            private float marsAngle  = 0.0f;
+            private float jupAngle   = 0.0f;
+            private float satAngle   = 0.0f;
+            private float uranAngle  = 0.0f;
+            private float nepAngle   = 0.0f;
+
+            @Override
+            public void handle(long now) {
+                // Prędkości orbitalne (zgodne z prawami Keplera)
+                mercAngle  += 0.040f;
+                venusAngle += 0.024f;
+                earthAngle += 0.015f;
+                earthRotation += 0.080f;
+                marsAngle  += 0.010f;
+                jupAngle   += 0.005f;
+                satAngle   += 0.003f;
+                uranAngle  += 0.0018f;
+                nepAngle   += 0.0010f;
+
+                // WSPÓŁRZĘDNE PLANET
+                params[2]  = (float) (sunX + MERCURY_ORBIT * Math.cos(mercAngle));
+                params[3]  = (float) (sunY + MERCURY_ORBIT * Math.sin(mercAngle));
+
+                params[4]  = (float) (sunX + VENUS_ORBIT * Math.cos(venusAngle));
+                params[5]  = (float) (sunY + VENUS_ORBIT * Math.sin(venusAngle));
+
+                params[6]  = (float) (sunX + EARTH_ORBIT * Math.cos(earthAngle));
+                params[7]  = (float) (sunY + EARTH_ORBIT * Math.sin(earthAngle));
+                params[8]  = earthRotation;
+
+                params[9]  = (float) (sunX + MARS_ORBIT * Math.cos(marsAngle));
+                params[10] = (float) (sunY + MARS_ORBIT * Math.sin(marsAngle));
+
+                params[11] = (float) (sunX + JUPITER_ORBIT * Math.cos(jupAngle));
+                params[12] = (float) (sunY + JUPITER_ORBIT * Math.sin(jupAngle));
+
+                params[13] = (float) (sunX + SATURN_ORBIT * Math.cos(satAngle));
+                params[14] = (float) (sunY + SATURN_ORBIT * Math.sin(satAngle));
+
+                params[15] = (float) (sunX + URANUS_ORBIT * Math.cos(uranAngle));
+                params[16] = (float) (sunY + URANUS_ORBIT * Math.sin(uranAngle));
+
+                params[17] = (float) (sunX + NEPTUNE_ORBIT * Math.cos(nepAngle));
+                params[18] = (float) (sunY + NEPTUNE_ORBIT * Math.sin(nepAngle));
+
+                // Wykonanie renderowania na GPU
+                executionPlan.execute();
+
+                // Odświeżenie klatki w JavaFX
+                pixelWriter.setPixels(0, 0, WIDTH, HEIGHT,
+                        javafx.scene.image.PixelFormat.getIntArgbInstance(),
+                        pixelBuffer, 0, WIDTH);
+            }
+        };
+        timer.start();
+    }
+
+    static void main(String[] args) {
+        launch(args);
+    }
+}
