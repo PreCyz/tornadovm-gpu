@@ -142,8 +142,8 @@ public class GravityGPU extends Application {
         title.setStyle("-fx-text-fill: #00ff88; -fx-font-weight: bold; -fx-font-size: 13px;");
 
         Button btnReset = new Button("RESET (SPACE)");
-        // Pasek boczny ma SIDEBAR_WIDTH (250px), wewnętrzny padding z lewej to 15px.
-        // Ustawienie max width na 215px sprawia, że przycisk kończy się dokładnie 5px przed prawą krawędzią ekranu.
+        // The sidebar is SIDEBAR_WIDTH (250 px), with 15 px of left padding.
+        // A 215 px button width leaves exactly 5 px before the right edge.
         btnReset.setStyle("-fx-background-color: #222; -fx-text-fill: #ff4444; -fx-border-color: #ff4444; -fx-font-weight: bold; -fx-cursor: hand; -fx-min-width: 215px; -fx-max-width: 215px;");
         btnReset.setFocusTraversable(false);
         btnReset.setOnAction(_ -> resetSystem());
@@ -291,10 +291,10 @@ public class GravityGPU extends Application {
         float cx = CANVAS_WIDTH / 2.0f;
         float cy = HEIGHT / 2.0f;
 
-        // Słońce
+        // Sun
         addBody("Sun", cx, cy, 0, 0, SUN_MASS, 16, Color.GOLD);
 
-        // Planety
+        // Planets
         addKeplerPlanet("Mercury", cx, cy, 55.0f,  0.055f, 3.0f, Color.GRAY);
         addKeplerPlanet("Venus",   cx, cy, 95.0f,  0.815f, 4.5f, Color.BEIGE);
         addKeplerPlanet("Earth",   cx, cy, EARTH_ORBIT_R, 1.000f, 5.0f, Color.DODGERBLUE);
@@ -304,7 +304,7 @@ public class GravityGPU extends Application {
         addKeplerPlanet("Uranus",  cx, cy, 365.0f, 14.5f,  7.0f, Color.LIGHTBLUE);
         addKeplerPlanet("Neptune", cx, cy, 420.0f, 17.1f,  7.0f, Color.ROYALBLUE);
 
-        // Kompensacja pędu dla Słońca
+        // Momentum compensation for the Sun.
         float totalPx = 0, totalPy = 0;
         for (int i = 1; i < bodyCount; i++) {
             totalPx += mass.get(i) * velX.get(i);

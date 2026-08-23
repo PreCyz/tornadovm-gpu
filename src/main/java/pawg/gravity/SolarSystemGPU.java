@@ -17,7 +17,7 @@ public class SolarSystemGPU extends Application {
     private static final int WIDTH = 880;
     private static final int HEIGHT = 880;
 
-    // Promienie Orbit (Dopasowane do wysokości 880px, max orbit = 415px)
+    // Orbit radii scaled to the 880 px canvas; the outermost orbit is 415 px.
     private static final float MERCURY_ORBIT = 55.0f;
     private static final float VENUS_ORBIT   = 90.0f;
     private static final float EARTH_ORBIT   = 130.0f;
@@ -29,7 +29,7 @@ public class SolarSystemGPU extends Application {
 
     private final int[] pixelBuffer = new int[WIDTH * HEIGHT];
 
-    // Tablica parametrów dla GPU:
+    // GPU parameter buffer:
     // [0]=sunX, [1]=sunY,
     // [2]=mercX, [3]=mercY, [4]=venusX, [5]=venusY,
     // [6]=earthX, [7]=earthY, [8]=earthRot,
@@ -55,7 +55,7 @@ public class SolarSystemGPU extends Application {
         float uranX    = p[15]; float uranY    = p[16];
         float nepX     = p[17]; float nepY     = p[18];
 
-        // Promienie ciał (zmniejszone dla przejrzystości widoku)
+        // Body radii reduced to keep the full system readable.
         float sunRSq   = 22.0f * 22.0f;
         float mercRSq  = 3.0f  * 3.0f;
         float venusRSq = 5.0f  * 5.0f;
@@ -82,7 +82,7 @@ public class SolarSystemGPU extends Application {
                 float distUranSq  = (x - uranX) * (x - uranX) + (y - uranY) * (y - uranY);
                 float distNepSq   = (x - nepX) * (x - nepX) + (y - nepY) * (y - nepY);
 
-                // 1. Słońce + Poświata
+                // 1. Sun and glow
                 if (distSunSq <= sunRSq) {
                     output[idx] = 0xFFFFD700;
                 } else if (distSunSq < sunRSq * 2.0f) {
@@ -91,15 +91,15 @@ public class SolarSystemGPU extends Application {
                     int alpha = (int) (glow * 180.0f);
                     output[idx] = (alpha << 24) | (255 << 16) | ((int) (200 * glow) << 8);
                 }
-                // 2. Merkury (Szary)
+                // 2. Mercury (gray)
                 else if (distMercSq <= mercRSq) {
                     output[idx] = 0xFFA0A0A0;
                 }
-                // 3. Wenus (Żółtawo-beżowy)
+                // 3. Venus (yellow-beige)
                 else if (distVenusSq <= venusRSq) {
                     output[idx] = 0xFFE3BB76;
                 }
-                // 4. Ziemia (Niebieska z obracającym się lądem)
+                // 4. Earth (blue with rotating land)
                 else if (distEarthSq <= earthRSq) {
                     float localX = x - earthX;
                     float localY = y - earthY;
@@ -112,11 +112,11 @@ public class SolarSystemGPU extends Application {
                         output[idx] = 0xFF1E90FF;
                     }
                 }
-                // 5. Mars (Czerwony / Rdzawy)
+                // 5. Mars (red/rust)
                 else if (distMarsSq <= marsRSq) {
                     output[idx] = 0xFFC1440E;
                 }
-                // 6. Jowisz (Paski atmosferyczne)
+                // 6. Jupiter (atmospheric bands)
                 else if (distJupSq <= jupRSq) {
                     float localY = y - jupY;
                     float band = TornadoMath.sin(localY * 0.6f);
@@ -126,30 +126,30 @@ public class SolarSystemGPU extends Application {
                         output[idx] = 0xFFE0C9A6;
                     }
                 }
-                // 7. Saturn + Pierścienie
+                // 7. Saturn and rings
                 else if (distSatSq <= satRSq) {
                     output[idx] = 0xFFE2C58F;
                 } else if (distSatSq >= satRSq * 1.6f && distSatSq <= satRSq * 4.5f) {
                     float distSat = TornadoMath.sqrt(distSatSq);
                     if (distSat > 14.0f && distSat < 19.0f) {
-                        output[idx] = 0xCCD4B27C; // Pierścień A/B
+                        output[idx] = 0xCCD4B27C; // A/B ring
                     } else if (distSat >= 19.0f && distSat <= 21.0f) {
-                        output[idx] = 0x10000000; // Przerwa Cassiniego
+                        output[idx] = 0x10000000; // Cassini division
                     } else if (distSat > 21.0f && distSat < 23.0f) {
-                        output[idx] = 0xAAAE9664; // Pierścień zewnętrzny
+                        output[idx] = 0xAAAE9664; // Outer ring
                     } else {
                         output[idx] = 0xFF020208;
                     }
                 }
-                // 8. Uran (Jasnoniebieski / Turkusowy)
+                // 8. Uranus (light blue/turquoise)
                 else if (distUranSq <= uranRSq) {
                     output[idx] = 0xFF4FD0E7;
                 }
-                // 9. Neptun (Ciemnoniebieski)
+                // 9. Neptune (dark blue)
                 else if (distNepSq <= nepRSq) {
                     output[idx] = 0xFF274687;
                 }
-                // 10. Tło Kosmosu + Linie Orbit
+                // 10. Space background and orbit lines
                 else {
                     float distSun = TornadoMath.sqrt(distSunSq);
 
@@ -165,9 +165,9 @@ public class SolarSystemGPU extends Application {
                     if (diffMerc < 0.7f || diffVenus < 0.7f || diffEarth < 0.7f ||
                             diffMars < 0.7f || diffJup < 0.7f   || diffSat < 0.7f   ||
                             diffUran < 0.7f || diffNep < 0.7f) {
-                        output[idx] = 0x20FFFFFF; // Dyskretne linie orbit
+                        output[idx] = 0x20FFFFFF; // Subtle orbit lines
                     } else {
-                        output[idx] = 0xFF020208; // Czarny kosmos
+                        output[idx] = 0xFF020208; // Black space
                     }
                 }
             }
@@ -197,7 +197,7 @@ public class SolarSystemGPU extends Application {
         StackPane root = new StackPane(imageView);
         Scene scene = new Scene(root, WIDTH, HEIGHT, Color.BLACK);
 
-        primaryStage.setTitle("TornadoVM + JavaFX: Pełny Układ Słoneczny (8 Planet)");
+        primaryStage.setTitle("Solar System");
         primaryStage.setScene(scene);
         primaryStage.show();
 
@@ -214,7 +214,7 @@ public class SolarSystemGPU extends Application {
 
             @Override
             public void handle(long now) {
-                // Prędkości orbitalne (zgodne z prawami Keplera)
+                // Orbital speeds approximated from Kepler-like scaling.
                 mercAngle  += 0.040f;
                 venusAngle += 0.024f;
                 earthAngle += 0.015f;
@@ -225,7 +225,7 @@ public class SolarSystemGPU extends Application {
                 uranAngle  += 0.0018f;
                 nepAngle   += 0.0010f;
 
-                // WSPÓŁRZĘDNE PLANET
+                // Planet coordinates
                 params[2]  = (float) (sunX + MERCURY_ORBIT * Math.cos(mercAngle));
                 params[3]  = (float) (sunY + MERCURY_ORBIT * Math.sin(mercAngle));
 
@@ -251,10 +251,10 @@ public class SolarSystemGPU extends Application {
                 params[17] = (float) (sunX + NEPTUNE_ORBIT * Math.cos(nepAngle));
                 params[18] = (float) (sunY + NEPTUNE_ORBIT * Math.sin(nepAngle));
 
-                // Wykonanie renderowania na GPU
+                // Render the frame on the GPU.
                 executionPlan.execute();
 
-                // Odświeżenie klatki w JavaFX
+                // Refresh the JavaFX frame.
                 pixelWriter.setPixels(0, 0, WIDTH, HEIGHT,
                         javafx.scene.image.PixelFormat.getIntArgbInstance(),
                         pixelBuffer, 0, WIDTH);

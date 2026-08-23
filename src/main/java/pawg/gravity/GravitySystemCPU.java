@@ -80,18 +80,18 @@ public class GravitySystemCPU extends Application {
 
         resetSystem();
 
-        // --- PRECYZYJNA OBSŁUGA DWUETAPOWEJ INTERAKCJI MYSZY ---
+        // --- Precise two-stage mouse interaction handling ---
 
         canvas.setOnMousePressed(event -> {
             if (creationState == CreationState.IDLE) {
-                // ETAP 1: Ustalanie pozycji i masy (Drag)
+                // Stage 1: choose position and mass by dragging.
                 bodyX = event.getX();
                 bodyY = event.getY();
                 createdMass = 1.0;
                 createdRadius = 5.0;
                 creationState = CreationState.SIZING_MASS;
             } else if (creationState == CreationState.SELECTING_VECTOR) {
-                // ETAP 2: Kliknięcie kończące i zatwierdzające wektor
+                // Stage 2: finish and confirm the velocity vector with a click.
                 double dx = event.getX() - bodyX;
                 double dy = event.getY() - bodyY;
 
@@ -123,7 +123,7 @@ public class GravitySystemCPU extends Application {
 
         canvas.setOnMouseReleased(event -> {
             if (creationState == CreationState.SIZING_MASS) {
-                // Przejście z ETAPU 1 do ETAPU 2 (wybór wektora)
+                // Move from stage 1 to stage 2 for vector selection.
                 vectorEndX = event.getX();
                 vectorEndY = event.getY();
                 creationState = CreationState.SELECTING_VECTOR;
@@ -132,7 +132,7 @@ public class GravitySystemCPU extends Application {
 
         canvas.setOnMouseMoved(event -> {
             if (creationState == CreationState.SELECTING_VECTOR) {
-                // Śledzenie myszy do podglądu wektora
+                // Track the mouse for vector preview.
                 vectorEndX = event.getX();
                 vectorEndY = event.getY();
             }
@@ -168,7 +168,7 @@ public class GravitySystemCPU extends Application {
         primaryStage.setScene(scene);
         primaryStage.show();
 
-        // Pętla renderująco-fizyczna
+        // Rendering and physics loop.
         AnimationTimer timer = new AnimationTimer() {
             private int frameCounter = 0;
 
@@ -206,7 +206,7 @@ public class GravitySystemCPU extends Application {
                     gc.fillOval(b.x - b.radius, b.y - b.radius, b.radius * 2, b.radius * 2);
                 }
 
-                // Wizualizacja tworzenia ciała
+                // Body creation visualization.
                 if (creationState == CreationState.SIZING_MASS) {
                     gc.setFill(Color.RED.deriveColor(0, 1, 1, 0.7));
                     gc.fillOval(bodyX - createdRadius, bodyY - createdRadius, createdRadius * 2, createdRadius * 2);
