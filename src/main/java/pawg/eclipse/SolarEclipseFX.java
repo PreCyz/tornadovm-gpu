@@ -134,7 +134,7 @@ public class SolarEclipseFX extends Application {
         Scene scene = new Scene(root, WIDTH, HEIGHT, Color.BLACK);
 
         primaryStage.setTitle(String.format(
-                "TornadoVM: Zaćmienie Słońca (Zakrycie: %.1f%%, Całkowity czas: %.1f sekund) [Kliknij, aby zresetować]",
+                "Solar Eclipse (Coverage: %.1f%%, Total time: %.1f sec) [Click to reset]",
                 coverageClamped, ECLIPSE_DURATION_SECONDS));
         primaryStage.setScene(scene);
         primaryStage.show();

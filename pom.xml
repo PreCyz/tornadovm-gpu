@@ -7,7 +7,7 @@
     <groupId>pawg.fastutil</groupId>
     <artifactId>tornadovm-gpu</artifactId>
     <version>1.0-SNAPSHOT</version>
-    <name>GameOfLife</name>
+    <name>tornadovm-gpu</name>
 
     <properties>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>

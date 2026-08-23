@@ -32,7 +32,6 @@ public class GameOfLifeInteractive extends Application {
     private static final int COLOR_DEAD = 0xFF111115;
 
     private TornadoExecutionPlan executionPlan;
-    private boolean userModified = false;
 
     @Override
     public void start(Stage primaryStage) {
@@ -90,8 +89,6 @@ public class GameOfLifeInteractive extends Application {
                 }
 
                 pixelWriter.setPixels(0, 0, WIDTH, HEIGHT, format, pixelBuffer, 0, WIDTH);
-
-                userModified = false; // Reset the flag after execution.
             }
         };
 
@@ -117,7 +114,6 @@ public class GameOfLifeInteractive extends Application {
                     }
                 }
             }
-            userModified = true;
         }
     }
 
