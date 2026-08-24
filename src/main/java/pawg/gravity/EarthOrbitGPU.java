@@ -2,10 +2,12 @@ package pawg.gravity;
 
 import javafx.animation.AnimationTimer;
 import javafx.application.Application;
+import javafx.geometry.Rectangle2D;
 import javafx.scene.Scene;
 import javafx.scene.image.*;
 import javafx.scene.layout.StackPane;
 import javafx.scene.paint.Color;
+import javafx.stage.Screen;
 import javafx.stage.Stage;
 import uk.ac.manchester.tornado.api.*;
 import uk.ac.manchester.tornado.api.annotations.Parallel;
@@ -122,12 +124,21 @@ public class EarthOrbitGPU extends Application {
         WritableImage writableImage = new WritableImage(WIDTH, HEIGHT);
         pixelWriter = writableImage.getPixelWriter();
         ImageView imageView = new ImageView(writableImage);
+        Rectangle2D screenBounds = Screen.getPrimary().getVisualBounds();
+        imageView.setFitWidth(screenBounds.getWidth());
+        imageView.setFitHeight(screenBounds.getHeight());
+        imageView.setPreserveRatio(true);
 
         StackPane root = new StackPane(imageView);
-        Scene scene = new Scene(root, WIDTH, HEIGHT, Color.BLACK);
+        Scene scene = new Scene(root, screenBounds.getWidth(), screenBounds.getHeight(), Color.BLACK);
 
         primaryStage.setTitle("Earth orbiting the Sun");
         primaryStage.setScene(scene);
+        primaryStage.setX(screenBounds.getMinX());
+        primaryStage.setY(screenBounds.getMinY());
+        primaryStage.setWidth(screenBounds.getWidth());
+        primaryStage.setHeight(screenBounds.getHeight());
+        primaryStage.setResizable(false);
         primaryStage.show();
 
         AnimationTimer timer = new AnimationTimer() {

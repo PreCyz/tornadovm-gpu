@@ -2,6 +2,7 @@ package pawg.gravity;
 
 import javafx.animation.AnimationTimer;
 import javafx.application.Application;
+import javafx.geometry.Rectangle2D;
 import javafx.geometry.VPos;
 import javafx.scene.Scene;
 import javafx.scene.canvas.Canvas;
@@ -12,6 +13,7 @@ import javafx.scene.layout.*;
 import javafx.scene.paint.Color;
 import javafx.scene.text.Font;
 import javafx.scene.text.TextAlignment;
+import javafx.stage.Screen;
 import javafx.stage.Stage;
 import uk.ac.manchester.tornado.api.TaskGraph;
 import uk.ac.manchester.tornado.api.TornadoExecutionPlan;
@@ -25,7 +27,7 @@ import java.util.List;
 public class GravityGPU extends Application {
 
     private static final int CANVAS_WIDTH = 1250;
-    private static final int SIDEBAR_WIDTH = 250;
+    private static final int SIDEBAR_WIDTH = 380;
     private static final int HEIGHT = 880;
     private static final int MAX_BODIES = 1024;
 
@@ -74,10 +76,16 @@ public class GravityGPU extends Application {
     private int customBodyCount = 0;
 
     private final VBox dashboardList = new VBox(6);
+    private double canvasWidth = CANVAS_WIDTH;
+    private double canvasHeight = HEIGHT;
 
     @Override
     public void start(Stage primaryStage) {
-        Canvas canvas = new Canvas(CANVAS_WIDTH, HEIGHT);
+        Rectangle2D screenBounds = Screen.getPrimary().getVisualBounds();
+        canvasWidth = Math.max(800.0, screenBounds.getWidth() - SIDEBAR_WIDTH);
+        canvasHeight = screenBounds.getHeight();
+
+        Canvas canvas = new Canvas(canvasWidth, canvasHeight);
         GraphicsContext gc = canvas.getGraphicsContext2D();
 
         for (int i = 0; i < MAX_BODIES; i++) {
@@ -141,15 +149,13 @@ public class GravityGPU extends Application {
         });
 
         VBox sidebar = new VBox(10);
-        sidebar.setStyle(String.format("-fx-background-color: #111118; -fx-padding: 15; -fx-min-width: %dpx; -fx-border-color: #333344; -fx-border-width: 0 0 0 1;", SIDEBAR_WIDTH));
+        sidebar.setStyle(String.format("-fx-background-color: #111118; -fx-padding: 15; -fx-min-width: %dpx; -fx-pref-width: %dpx; -fx-border-color: #333344; -fx-border-width: 0 0 0 1;", SIDEBAR_WIDTH, SIDEBAR_WIDTH));
 
         Label title = new Label("GPU DASHBOARD (TornadoVM)");
         title.setStyle("-fx-text-fill: #00ff88; -fx-font-weight: bold; -fx-font-size: 13px;");
 
         Button btnReset = new Button("RESET (SPACE)");
-        // The sidebar is SIDEBAR_WIDTH (250 px), with 15 px of left padding.
-        // A 215 px button width leaves exactly 5 px before the right edge.
-        btnReset.setStyle("-fx-background-color: #222; -fx-text-fill: #ff4444; -fx-border-color: #ff4444; -fx-font-weight: bold; -fx-cursor: hand; -fx-min-width: 215px; -fx-max-width: 215px;");
+        btnReset.setStyle("-fx-background-color: #222; -fx-text-fill: #ff4444; -fx-border-color: #ff4444; -fx-font-weight: bold; -fx-cursor: hand; -fx-max-width: Infinity;");
         btnReset.setFocusTraversable(false);
         btnReset.setOnAction(_ -> resetSystem());
 
@@ -159,7 +165,7 @@ public class GravityGPU extends Application {
         root.setCenter(canvas);
         root.setRight(sidebar);
 
-        Scene scene = new Scene(root, CANVAS_WIDTH + SIDEBAR_WIDTH, HEIGHT, Color.BLACK);
+        Scene scene = new Scene(root, screenBounds.getWidth(), screenBounds.getHeight(), Color.BLACK);
 
         scene.setOnKeyPressed(event -> {
             if (event.getCode() == KeyCode.SPACE) {
@@ -169,6 +175,11 @@ public class GravityGPU extends Application {
 
         primaryStage.setTitle("N-Body Gravity Simulator");
         primaryStage.setScene(scene);
+        primaryStage.setX(screenBounds.getMinX());
+        primaryStage.setY(screenBounds.getMinY());
+        primaryStage.setWidth(screenBounds.getWidth());
+        primaryStage.setHeight(screenBounds.getHeight());
+        primaryStage.setResizable(false);
         primaryStage.show();
 
         AnimationTimer timer = new AnimationTimer() {
@@ -199,7 +210,7 @@ public class GravityGPU extends Application {
                 }
 
                 gc.setFill(Color.rgb(3, 3, 10, 0.35));
-                gc.fillRect(0, 0, CANVAS_WIDTH, HEIGHT);
+                gc.fillRect(0, 0, canvasWidth, canvasHeight);
 
                 gc.setTextAlign(TextAlignment.CENTER);
                 gc.setTextBaseline(VPos.BOTTOM);
@@ -486,8 +497,8 @@ public class GravityGPU extends Application {
             trailY.get(i).clear();
         }
 
-        float cx = CANVAS_WIDTH / 2.0f;
-        float cy = HEIGHT / 2.0f;
+        float cx = (float) (canvasWidth / 2.0);
+        float cy = (float) (canvasHeight / 2.0);
 
         // Sun
         addBody("Sun", cx, cy, 0, 0, SUN_MASS, 16, Color.GOLD, false);

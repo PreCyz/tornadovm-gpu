@@ -2,6 +2,7 @@ package pawg.gravity;
 
 import javafx.animation.AnimationTimer;
 import javafx.application.Application;
+import javafx.geometry.Rectangle2D;
 import javafx.scene.Scene;
 import javafx.scene.canvas.Canvas;
 import javafx.scene.canvas.GraphicsContext;
@@ -11,6 +12,7 @@ import javafx.scene.input.KeyCode;
 import javafx.scene.layout.BorderPane;
 import javafx.scene.layout.VBox;
 import javafx.scene.paint.Color;
+import javafx.stage.Screen;
 import javafx.stage.Stage;
 
 import java.util.ArrayList;
@@ -19,6 +21,7 @@ import java.util.List;
 public class GravitySystemCPU extends Application {
 
     private static final int CANVAS_WIDTH = 1600;
+    private static final int SIDEBAR_WIDTH = 430;
     private static final int HEIGHT = 880;
 
     private static final double SPEED_FACTOR = 0.1;
@@ -26,6 +29,8 @@ public class GravitySystemCPU extends Application {
     private static final double SUN_MASS = 100000.0;
     private static final double EARTH_ORBIT_R = 140.0;
     private static final double VELOCITY_SCALE = 0.085;
+    private static final double MAX_CREATED_BODY_RADIUS = 20.0;
+    private static final double CENTER_COLLISION_EPSILON = 0.5;
 
     private enum CreationState { IDLE, SIZING_MASS, SELECTING_VECTOR }
     private CreationState creationState = CreationState.IDLE;
@@ -72,10 +77,16 @@ public class GravitySystemCPU extends Application {
 
     private final List<Body> bodies = new ArrayList<>();
     private final VBox dashboardList = new VBox(6);
+    private double canvasWidth = CANVAS_WIDTH;
+    private double canvasHeight = HEIGHT;
 
     @Override
     public void start(Stage primaryStage) {
-        Canvas canvas = new Canvas(CANVAS_WIDTH, HEIGHT);
+        Rectangle2D screenBounds = Screen.getPrimary().getVisualBounds();
+        canvasWidth = Math.max(800.0, screenBounds.getWidth() - SIDEBAR_WIDTH);
+        canvasHeight = screenBounds.getHeight();
+
+        Canvas canvas = new Canvas(canvasWidth, canvasHeight);
         GraphicsContext gc = canvas.getGraphicsContext2D();
 
         resetSystem();
@@ -117,7 +128,7 @@ public class GravitySystemCPU extends Application {
                 double dist = Math.sqrt(dx * dx + dy * dy);
 
                 createdMass = Math.max(0.1, 1.0 + Math.pow(dist / 4.0, 1.8));
-                createdRadius = Math.max(3.0, 4.0 + Math.pow(createdMass, 1.0 / 3.0) * 1.8);
+                createdRadius = radiusForCreatedMass(createdMass);
             }
         });
 
@@ -140,7 +151,7 @@ public class GravitySystemCPU extends Application {
 
         // UI Panel
         VBox sidebar = new VBox(10);
-        sidebar.setStyle("-fx-background-color: #111118; -fx-padding: 15; -fx-min-width: 250px; -fx-border-color: #333344; -fx-border-width: 0 0 0 1;");
+        sidebar.setStyle(String.format("-fx-background-color: #111118; -fx-padding: 15; -fx-min-width: %dpx; -fx-pref-width: %dpx; -fx-border-color: #333344; -fx-border-width: 0 0 0 1;", SIDEBAR_WIDTH, SIDEBAR_WIDTH));
 
         Label title = new Label("NBodies Panel");
         title.setStyle("-fx-text-fill: #ffffff; -fx-font-weight: bold; -fx-font-size: 14px;");
@@ -150,13 +161,22 @@ public class GravitySystemCPU extends Application {
         btnReset.setFocusTraversable(false);
         btnReset.setOnAction(_ -> resetSystem());
 
-        sidebar.getChildren().addAll(title, btnReset, dashboardList);
+        Label legend = new Label("""
+                M = mass
+                R = body radius
+                V = speed
+                A = acceleration
+                X/Y = position
+                Nearest = closest body and distance""");
+        legend.setStyle("-fx-text-fill: #b8b8c8; -fx-font-family: monospace; -fx-font-size: 11px; -fx-padding: 0 0 6 0;");
+
+        sidebar.getChildren().addAll(title, btnReset, legend, dashboardList);
 
         BorderPane root = new BorderPane();
         root.setCenter(canvas);
         root.setRight(sidebar);
 
-        Scene scene = new Scene(root, CANVAS_WIDTH + 250, HEIGHT, Color.BLACK);
+        Scene scene = new Scene(root, screenBounds.getWidth(), screenBounds.getHeight(), Color.BLACK);
 
         scene.setOnKeyPressed(event -> {
             if (event.getCode() == KeyCode.SPACE) {
@@ -166,6 +186,11 @@ public class GravitySystemCPU extends Application {
 
         primaryStage.setTitle("Gravity simulator | 1. Hold = Mass | 2. Click = Velocity V");
         primaryStage.setScene(scene);
+        primaryStage.setX(screenBounds.getMinX());
+        primaryStage.setY(screenBounds.getMinY());
+        primaryStage.setWidth(screenBounds.getWidth());
+        primaryStage.setHeight(screenBounds.getHeight());
+        primaryStage.setResizable(false);
         primaryStage.show();
 
         // Rendering and physics loop.
@@ -179,6 +204,7 @@ public class GravitySystemCPU extends Application {
 
                 for (int step = 0; step < subSteps; step++) {
                     physicsStepVerlet(dt);
+                    resolveCollisions();
                 }
 
                 frameCounter++;
@@ -193,7 +219,7 @@ public class GravitySystemCPU extends Application {
                 }
 
                 gc.setFill(Color.rgb(3, 3, 10, 0.35));
-                gc.fillRect(0, 0, CANVAS_WIDTH, HEIGHT);
+                gc.fillRect(0, 0, canvasWidth, canvasHeight);
 
                 for (Body b : bodies) {
                     gc.setStroke(b.color.deriveColor(0, 1, 1, 0.3));
@@ -240,11 +266,51 @@ public class GravitySystemCPU extends Application {
     private void updateDashboard() {
         dashboardList.getChildren().clear();
         for (Body b : bodies) {
-            Label lbl = new Label(String.format("%-10s | M: %-6.1f | V: %.2f", b.name, b.mass, b.getSpeed()));
+            Body nearest = findNearestBody(b);
+            double acceleration = Math.sqrt(b.ax * b.ax + b.ay * b.ay);
+            String nearestText = nearest == null
+                    ? "Nearest: -"
+                    : String.format("Nearest: %s %.1fpx", nearest.name, distanceBetween(b, nearest));
+            Label lbl = new Label(String.format(
+                    "%-10s | M:%8.2f | R:%4.1f%nV:%7.2f | A:%7.3f | X:%6.1f Y:%6.1f%n%s",
+                    b.name, b.mass, b.radius,
+                    b.getSpeed(), acceleration, b.x, b.y,
+                    nearestText
+            ));
             String hexColor = toHex(b.color);
-            lbl.setStyle(String.format("-fx-text-fill: %s; -fx-font-family: monospace; -fx-font-size: 11px;", hexColor));
+            lbl.setStyle(String.format("-fx-text-fill: %s; -fx-font-family: monospace; -fx-font-size: 11px; -fx-padding: 2 0 4 0;", hexColor));
             dashboardList.getChildren().add(lbl);
         }
+    }
+
+    private Body findNearestBody(Body body) {
+        Body nearest = null;
+        double nearestDistanceSq = Double.MAX_VALUE;
+        for (Body other : bodies) {
+            if (other == body) {
+                continue;
+            }
+
+            double dx = other.x - body.x;
+            double dy = other.y - body.y;
+            double distanceSq = dx * dx + dy * dy;
+            if (distanceSq < nearestDistanceSq) {
+                nearestDistanceSq = distanceSq;
+                nearest = other;
+            }
+        }
+
+        return nearest;
+    }
+
+    private double distanceBetween(Body first, Body second) {
+        double dx = second.x - first.x;
+        double dy = second.y - first.y;
+        return Math.sqrt(dx * dx + dy * dy);
+    }
+
+    private double radiusForCreatedMass(double bodyMass) {
+        return Math.min(MAX_CREATED_BODY_RADIUS, Math.max(3.0, 4.0 + Math.pow(bodyMass, 1.0 / 3.0) * 1.8));
     }
 
     private String toHex(Color c) {
@@ -259,8 +325,8 @@ public class GravitySystemCPU extends Application {
         creationState = CreationState.IDLE;
         customBodyCount = 0;
 
-        double cx = CANVAS_WIDTH / 2.0;
-        double cy = HEIGHT / 2.0;
+        double cx = canvasWidth / 2.0;
+        double cy = canvasHeight / 2.0;
 
         Body sun = new Body("Sun", cx, cy, 0, 0, SUN_MASS, 16, Color.GOLD);
         bodies.add(sun);
@@ -310,6 +376,66 @@ public class GravitySystemCPU extends Application {
             b.vx += 0.5 * (oldA[i][0] + b.ax) * dt;
             b.vy += 0.5 * (oldA[i][1] + b.ay) * dt;
         }
+    }
+
+    private void resolveCollisions() {
+        boolean mergedAny = false;
+        for (int i = 0; i < bodies.size(); i++) {
+            Body first = bodies.get(i);
+            for (int j = i + 1; j < bodies.size(); j++) {
+                Body second = bodies.get(j);
+                if (centersCollide(first, second)) {
+                    first = mergeBodies(first, second);
+                    bodies.remove(j);
+                    j--;
+                    mergedAny = true;
+                }
+            }
+        }
+
+        if (mergedAny) {
+            computeAccelerations();
+        }
+    }
+
+    private boolean centersCollide(Body first, Body second) {
+        double dx = second.x - first.x;
+        double dy = second.y - first.y;
+        return dx * dx + dy * dy <= CENTER_COLLISION_EPSILON * CENTER_COLLISION_EPSILON;
+    }
+
+    private Body mergeBodies(Body first, Body second) {
+        double mergedMass = first.mass + second.mass;
+        if (mergedMass <= 0.0) {
+            return first;
+        }
+
+        boolean keepFirst = first.mass >= second.mass;
+        Body survivor = keepFirst ? first : second;
+        Body absorbed = keepFirst ? second : first;
+
+        double mergedX = (first.x * first.mass + second.x * second.mass) / mergedMass;
+        double mergedY = (first.y * first.mass + second.y * second.mass) / mergedMass;
+        double mergedVx = (first.vx * first.mass + second.vx * second.mass) / mergedMass;
+        double mergedVy = (first.vy * first.mass + second.vy * second.mass) / mergedMass;
+
+        survivor.name = survivor.name + "+";
+        survivor.x = mergedX;
+        survivor.y = mergedY;
+        survivor.vx = mergedVx;
+        survivor.vy = mergedVy;
+        survivor.ax = 0.0;
+        survivor.ay = 0.0;
+        survivor.mass = mergedMass;
+        survivor.radius = radiusForCreatedMass(mergedMass);
+
+        if (survivor != first) {
+            bodies.set(bodies.indexOf(first), survivor);
+        }
+
+        absorbed.trailX.clear();
+        absorbed.trailY.clear();
+        return survivor;
     }
 
     private void computeAccelerations() {

@@ -2,10 +2,12 @@ package pawg.gravity;
 
 import javafx.animation.AnimationTimer;
 import javafx.application.Application;
+import javafx.geometry.Rectangle2D;
 import javafx.scene.Scene;
 import javafx.scene.image.*;
 import javafx.scene.layout.StackPane;
 import javafx.scene.paint.Color;
+import javafx.stage.Screen;
 import javafx.stage.Stage;
 import uk.ac.manchester.tornado.api.*;
 import uk.ac.manchester.tornado.api.annotations.Parallel;
@@ -17,7 +19,6 @@ public class SolarSystemGPU extends Application {
     private static final int WIDTH = 880;
     private static final int HEIGHT = 880;
 
-    // Orbit radii scaled to the 880 px canvas; the outermost orbit is 415 px.
     private static final float MERCURY_ORBIT = 55.0f;
     private static final float VENUS_ORBIT   = 90.0f;
     private static final float EARTH_ORBIT   = 130.0f;
@@ -56,15 +57,25 @@ public class SolarSystemGPU extends Application {
         float nepX     = p[17]; float nepY     = p[18];
 
         // Body radii reduced to keep the full system readable.
-        float sunRSq   = 22.0f * 22.0f;
-        float mercRSq  = 3.0f  * 3.0f;
-        float venusRSq = 5.0f  * 5.0f;
-        float earthRSq = 6.0f  * 6.0f;
-        float marsRSq  = 4.0f  * 4.0f;
-        float jupRSq   = 13.0f * 13.0f;
-        float satRSq   = 10.0f * 10.0f;
-        float uranRSq  = 8.0f  * 8.0f;
-        float nepRSq   = 8.0f  * 8.0f;
+        float sunR   = 22.0f;
+        float mercR  = 3.0f;
+        float venusR = 5.0f;
+        float earthR = 6.0f;
+        float marsR  = 4.0f;
+        float jupR   = 13.0f;
+        float satR   = 10.0f;
+        float uranR  = 8.0f;
+        float nepR   = 8.0f;
+
+        float sunRSq   = sunR * sunR;
+        float mercRSq  = mercR * mercR;
+        float venusRSq = venusR * venusR;
+        float earthRSq = earthR * earthR;
+        float marsRSq  = marsR * marsR;
+        float jupRSq   = jupR * jupR;
+        float satRSq   = satR * satR;
+        float uranRSq  = uranR * uranR;
+        float nepRSq   = nepR * nepR;
 
         for (@Parallel int y = 0; y < height; y++) {
             for (@Parallel int x = 0; x < width; x++) {
@@ -87,7 +98,7 @@ public class SolarSystemGPU extends Application {
                     output[idx] = 0xFFFFD700;
                 } else if (distSunSq < sunRSq * 2.0f) {
                     float distSun = TornadoMath.sqrt(distSunSq);
-                    float glow = 1.0f - ((distSun - 22.0f) / 22.0f);
+                    float glow = 1.0f - ((distSun - sunR) / sunR);
                     int alpha = (int) (glow * 180.0f);
                     output[idx] = (alpha << 24) | (255 << 16) | ((int) (200 * glow) << 8);
                 }
@@ -106,7 +117,8 @@ public class SolarSystemGPU extends Application {
                     float rotX = localX * TornadoMath.cos(earthRot) - localY * TornadoMath.sin(earthRot);
                     float rotY = localX * TornadoMath.sin(earthRot) + localY * TornadoMath.cos(earthRot);
 
-                    if ((rotX > -3.0f && rotX < 2.0f && rotY > -4.0f && rotY < 3.0f)) {
+                    if ((rotX > -3.0f && rotX < 2.0f &&
+                            rotY > -4.0f && rotY < 3.0f)) {
                         output[idx] = 0xFF2E8B57;
                     } else {
                         output[idx] = 0xFF1E90FF;
@@ -166,10 +178,11 @@ public class SolarSystemGPU extends Application {
                     float diffSat   = TornadoMath.abs(distSun - 300.0f);
                     float diffUran  = TornadoMath.abs(distSun - 360.0f);
                     float diffNep   = TornadoMath.abs(distSun - 415.0f);
+                    float orbitLineWidth = 0.7f;
 
-                    if (diffMerc < 0.7f || diffVenus < 0.7f || diffEarth < 0.7f ||
-                            diffMars < 0.7f || diffJup < 0.7f   || diffSat < 0.7f   ||
-                            diffUran < 0.7f || diffNep < 0.7f) {
+                    if (diffMerc < orbitLineWidth || diffVenus < orbitLineWidth || diffEarth < orbitLineWidth ||
+                            diffMars < orbitLineWidth || diffJup < orbitLineWidth   || diffSat < orbitLineWidth   ||
+                            diffUran < orbitLineWidth || diffNep < orbitLineWidth) {
                         output[idx] = 0x20FFFFFF; // Subtle orbit lines
                     } else {
                         output[idx] = 0xFF020208; // Black space
@@ -198,12 +211,21 @@ public class SolarSystemGPU extends Application {
         WritableImage writableImage = new WritableImage(WIDTH, HEIGHT);
         pixelWriter = writableImage.getPixelWriter();
         ImageView imageView = new ImageView(writableImage);
+        Rectangle2D screenBounds = Screen.getPrimary().getVisualBounds();
+        imageView.setFitWidth(screenBounds.getWidth());
+        imageView.setFitHeight(screenBounds.getHeight());
+        imageView.setPreserveRatio(true);
 
         StackPane root = new StackPane(imageView);
-        Scene scene = new Scene(root, WIDTH, HEIGHT, Color.BLACK);
+        Scene scene = new Scene(root, screenBounds.getWidth(), screenBounds.getHeight(), Color.BLACK);
 
         primaryStage.setTitle("Solar System");
         primaryStage.setScene(scene);
+        primaryStage.setX(screenBounds.getMinX());
+        primaryStage.setY(screenBounds.getMinY());
+        primaryStage.setWidth(screenBounds.getWidth());
+        primaryStage.setHeight(screenBounds.getHeight());
+        primaryStage.setResizable(false);
         primaryStage.show();
 
         AnimationTimer timer = new AnimationTimer() {
