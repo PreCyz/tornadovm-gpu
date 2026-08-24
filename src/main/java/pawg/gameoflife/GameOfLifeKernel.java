@@ -32,4 +32,10 @@ public class GameOfLifeKernel {
             }
         }
     }
+
+    public static void renderCells(int[] grid, int[] output, int size, int aliveColor, int deadColor) {
+        for (@Parallel int i = 0; i < size; i++) {
+            output[i] = grid[i] == 1 ? aliveColor : deadColor;
+        }
+    }
 }

@@ -100,7 +100,7 @@ public class GravitySystemCPU extends Application {
 
                 customBodyCount++;
                 Body customBody = new Body(
-                        String.format("Obiekt #%d", customBodyCount),
+                        String.format("Body #%d", customBodyCount),
                         bodyX, bodyY, vx, vy, createdMass, createdRadius, Color.RED
                 );
                 bodies.add(customBody);
@@ -142,7 +142,7 @@ public class GravitySystemCPU extends Application {
         VBox sidebar = new VBox(10);
         sidebar.setStyle("-fx-background-color: #111118; -fx-padding: 15; -fx-min-width: 250px; -fx-border-color: #333344; -fx-border-width: 0 0 0 1;");
 
-        Label title = new Label("PANEL OBIEKTÓW");
+        Label title = new Label("NBodies Panel");
         title.setStyle("-fx-text-fill: #ffffff; -fx-font-weight: bold; -fx-font-size: 14px;");
 
         Button btnReset = new Button("RESET (SPACE)");
@@ -164,7 +164,7 @@ public class GravitySystemCPU extends Application {
             }
         });
 
-        primaryStage.setTitle("Symulator Grawitacyjny | 1. Przytrzymaj = Masa | 2. Kliknij = Wektor V");
+        primaryStage.setTitle("Gravity simulator | 1. Hold = Mass | 2. Click = Velocity V");
         primaryStage.setScene(scene);
         primaryStage.show();
 

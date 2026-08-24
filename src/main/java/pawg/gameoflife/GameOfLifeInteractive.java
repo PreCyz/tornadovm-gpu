@@ -50,7 +50,8 @@ public class GameOfLifeInteractive extends Application {
                 // Execute simulation steps in VRAM.
                 .task("step1", GameOfLifeKernel::computeNextGeneration, gridA, gridB, WIDTH, HEIGHT)
                 .task("step2", GameOfLifeKernel::computeNextGeneration, gridB, gridA, WIDTH, HEIGHT)
-                .transferToHost(DataTransferMode.EVERY_EXECUTION, gridA);
+                .task("render", GameOfLifeKernel::renderCells, gridA, pixelBuffer, SIZE, COLOR_ALIVE, COLOR_DEAD)
+                .transferToHost(DataTransferMode.EVERY_EXECUTION, gridA, pixelBuffer);
 
         executionPlan = new TornadoExecutionPlan(taskGraph.snapshot());
 
@@ -82,11 +83,6 @@ public class GameOfLifeInteractive extends Application {
                 // synchronizes the modified gridA with VRAM because it uses EVERY_EXECUTION.
 
                 executionPlan.execute();
-
-                // Convert cell state to pixel colors.
-                for (int i = 0; i < SIZE; i++) {
-                    pixelBuffer[i] = (gridA[i] == 1) ? COLOR_ALIVE : COLOR_DEAD;
-                }
 
                 pixelWriter.setPixels(0, 0, WIDTH, HEIGHT, format, pixelBuffer, 0, WIDTH);
             }

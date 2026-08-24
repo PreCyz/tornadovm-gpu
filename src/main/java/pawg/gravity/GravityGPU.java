@@ -6,11 +6,9 @@ import javafx.geometry.VPos;
 import javafx.scene.Scene;
 import javafx.scene.canvas.Canvas;
 import javafx.scene.canvas.GraphicsContext;
-import javafx.scene.control.Button;
-import javafx.scene.control.Label;
+import javafx.scene.control.*;
 import javafx.scene.input.KeyCode;
-import javafx.scene.layout.BorderPane;
-import javafx.scene.layout.VBox;
+import javafx.scene.layout.*;
 import javafx.scene.paint.Color;
 import javafx.scene.text.Font;
 import javafx.scene.text.TextAlignment;
@@ -37,6 +35,8 @@ public class GravityGPU extends Application {
     private static final float SUN_MASS = 100000.0f;
     private static final float EARTH_ORBIT_R = 140.0f;
     private static final float VELOCITY_SCALE = 0.085f;
+    private static final float MAX_CREATED_BODY_RADIUS = 20.0f;
+    private static final float CENTER_COLLISION_EPSILON = 0.5f;
 
     private final FloatArray posX = new FloatArray(MAX_BODIES);
     private final FloatArray posY = new FloatArray(MAX_BODIES);
@@ -47,11 +47,16 @@ public class GravityGPU extends Application {
     private final FloatArray mass = new FloatArray(MAX_BODIES);
     private final FloatArray radius = new FloatArray(MAX_BODIES);
     private final IntArray activeState = new IntArray(MAX_BODIES);
+    private final IntArray collisionTarget = new IntArray(MAX_BODIES);
 
     private final FloatArray physParams = new FloatArray(2);
 
     private final String[] bodyNames = new String[MAX_BODIES];
     private final Color[] bodyColors = new Color[MAX_BODIES];
+    private final boolean[] editableMass = new boolean[MAX_BODIES];
+    private final HBox[] dashboardRows = new HBox[MAX_BODIES];
+    private final Label[] dashboardLabels = new Label[MAX_BODIES];
+    private final TextField[] massFields = new TextField[MAX_BODIES];
     private final List<List<Float>> trailX = new ArrayList<>();
     private final List<List<Float>> trailY = new ArrayList<>();
 
@@ -99,10 +104,10 @@ public class GravityGPU extends Application {
 
                 customBodyCount++;
                 addBody(
-                        String.format("Obiekt #%d", customBodyCount),
+                        String.format("Body #%d", customBodyCount),
                         clickX, clickY,
                         dx * VELOCITY_SCALE, dy * VELOCITY_SCALE,
-                        createdMass, createdRadius, Color.RED
+                        createdMass, createdRadius, Color.RED, true
                 );
 
                 creationState = CreationState.IDLE;
@@ -116,7 +121,7 @@ public class GravityGPU extends Application {
                 float dist = (float) Math.sqrt(dx * dx + dy * dy);
 
                 createdMass = (float) Math.max(0.1, 1.0 + Math.pow(dist / 4.0, 1.8));
-                createdRadius = (float) Math.max(3.0, 4.0 + Math.pow(createdMass, 1.0 / 3.0) * 1.8);
+                createdRadius = radiusForCreatedMass(createdMass);
             }
         });
 
@@ -174,6 +179,7 @@ public class GravityGPU extends Application {
                 int subSteps = 8;
                 for (int step = 0; step < subSteps; step++) {
                     executionPlan.execute();
+                    resolveCollisions();
                 }
 
                 frameCounter++;
@@ -254,20 +260,207 @@ public class GravityGPU extends Application {
                 .transferToDevice(DataTransferMode.EVERY_EXECUTION, posX, posY, velX, velY, accX, accY, mass, activeState, physParams)
                 .task("computeForces", PhysicsKernels::computeForces, posX, posY, accX, accY, mass, activeState, physParams)
                 .task("integrateMotion", PhysicsKernels::integrateMotion, posX, posY, velX, velY, accX, accY, activeState, physParams)
-                .transferToHost(DataTransferMode.EVERY_EXECUTION, posX, posY, velX, velY);
+                .task("detectCollisions", PhysicsKernels::detectCollisions, posX, posY, activeState, collisionTarget, CENTER_COLLISION_EPSILON)
+                .transferToHost(DataTransferMode.EVERY_EXECUTION, posX, posY, velX, velY, collisionTarget);
 
         executionPlan = new TornadoExecutionPlan(taskGraph.snapshot());
     }
 
+    private void resolveCollisions() {
+        boolean mergedAny = false;
+        for (int i = 0; i < bodyCount; i++) {
+            int j = collisionTarget.get(i);
+            if (j >= 0 && j < bodyCount && i < j && activeState.get(i) == 1 && activeState.get(j) == 1) {
+                mergeBodies(i, j);
+                mergedAny = true;
+            }
+        }
+
+        if (mergedAny) {
+            compactBodies();
+        }
+    }
+
+    private void mergeBodies(int firstIndex, int secondIndex) {
+        float firstMass = mass.get(firstIndex);
+        float secondMass = mass.get(secondIndex);
+        float mergedMass = firstMass + secondMass;
+        if (mergedMass <= 0.0f) {
+            activeState.set(secondIndex, 0);
+            return;
+        }
+
+        float mergedX = (posX.get(firstIndex) * firstMass + posX.get(secondIndex) * secondMass) / mergedMass;
+        float mergedY = (posY.get(firstIndex) * firstMass + posY.get(secondIndex) * secondMass) / mergedMass;
+        float mergedVx = (velX.get(firstIndex) * firstMass + velX.get(secondIndex) * secondMass) / mergedMass;
+        float mergedVy = (velY.get(firstIndex) * firstMass + velY.get(secondIndex) * secondMass) / mergedMass;
+
+        boolean keepFirst = firstMass >= secondMass;
+        int survivor = keepFirst ? firstIndex : secondIndex;
+        int absorbed = keepFirst ? secondIndex : firstIndex;
+
+        posX.set(survivor, mergedX);
+        posY.set(survivor, mergedY);
+        velX.set(survivor, mergedVx);
+        velY.set(survivor, mergedVy);
+        accX.set(survivor, 0.0f);
+        accY.set(survivor, 0.0f);
+        mass.set(survivor, mergedMass);
+        radius.set(survivor, radiusForCreatedMass(mergedMass));
+        bodyNames[survivor] = bodyNames[survivor] + "+";
+        editableMass[survivor] = editableMass[survivor] || editableMass[absorbed];
+        activeState.set(absorbed, 0);
+        trailX.get(absorbed).clear();
+        trailY.get(absorbed).clear();
+    }
+
+    private void compactBodies() {
+        int writeIndex = 0;
+        for (int readIndex = 0; readIndex < bodyCount; readIndex++) {
+            if (activeState.get(readIndex) == 0) {
+                continue;
+            }
+
+            if (writeIndex != readIndex) {
+                copyBody(readIndex, writeIndex);
+            }
+            writeIndex++;
+        }
+
+        for (int i = writeIndex; i < bodyCount; i++) {
+            clearBodySlot(i);
+        }
+        bodyCount = writeIndex;
+    }
+
+    private void copyBody(int source, int target) {
+        bodyNames[target] = bodyNames[source];
+        posX.set(target, posX.get(source));
+        posY.set(target, posY.get(source));
+        velX.set(target, velX.get(source));
+        velY.set(target, velY.get(source));
+        accX.set(target, accX.get(source));
+        accY.set(target, accY.get(source));
+        mass.set(target, mass.get(source));
+        radius.set(target, radius.get(source));
+        bodyColors[target] = bodyColors[source];
+        editableMass[target] = editableMass[source];
+        activeState.set(target, 1);
+        collisionTarget.set(target, -1);
+
+        trailX.get(target).clear();
+        trailX.get(target).addAll(trailX.get(source));
+        trailY.get(target).clear();
+        trailY.get(target).addAll(trailY.get(source));
+        dashboardRows[target] = null;
+        dashboardLabels[target] = null;
+        massFields[target] = null;
+    }
+
+    private void clearBodySlot(int i) {
+        bodyNames[i] = null;
+        posX.set(i, 0.0f);
+        posY.set(i, 0.0f);
+        velX.set(i, 0.0f);
+        velY.set(i, 0.0f);
+        accX.set(i, 0.0f);
+        accY.set(i, 0.0f);
+        mass.set(i, 0.0f);
+        radius.set(i, 0.0f);
+        bodyColors[i] = null;
+        editableMass[i] = false;
+        activeState.set(i, 0);
+        collisionTarget.set(i, -1);
+        trailX.get(i).clear();
+        trailY.get(i).clear();
+        dashboardRows[i] = null;
+        dashboardLabels[i] = null;
+        massFields[i] = null;
+    }
+
     private void updateDashboard() {
-        dashboardList.getChildren().clear();
+        while (dashboardList.getChildren().size() > bodyCount) {
+            dashboardList.getChildren().removeLast();
+        }
+
         for (int i = 0; i < bodyCount; i++) {
             float speed = (float) Math.sqrt(velX.get(i) * velX.get(i) + velY.get(i) * velY.get(i));
-            Label lbl = new Label(String.format("%-10s | M: %-6.2f | V: %.2f", bodyNames[i], mass.get(i), speed));
-            String hexColor = toHex(bodyColors[i]);
-            lbl.setStyle(String.format("-fx-text-fill: %s; -fx-font-family: monospace; -fx-font-size: 11px;", hexColor));
-            dashboardList.getChildren().add(lbl);
+            HBox row = dashboardRows[i];
+            Label label = dashboardLabels[i];
+
+            if (row == null) {
+                row = createDashboardRow(i);
+                dashboardRows[i] = row;
+                label = dashboardLabels[i];
+            }
+
+            if (editableMass[i]) {
+                label.setText(String.format("%-10s | V: %.2f", bodyNames[i], speed));
+                TextField massField = massFields[i];
+                if (!massField.isFocused()) {
+                    massField.setText(String.format("%.2f", mass.get(i)));
+                }
+            } else {
+                label.setText(String.format("%-10s | M: %-6.2f | V: %.2f", bodyNames[i], mass.get(i), speed));
+            }
+
+            if (dashboardList.getChildren().size() <= i) {
+                dashboardList.getChildren().add(row);
+            } else if (dashboardList.getChildren().get(i) != row) {
+                dashboardList.getChildren().set(i, row);
+            }
         }
+    }
+
+    private HBox createDashboardRow(int i) {
+        String hexColor = toHex(bodyColors[i]);
+        Label label = new Label();
+        label.setStyle(String.format("-fx-text-fill: %s; -fx-font-family: monospace; -fx-font-size: 11px;", hexColor));
+        dashboardLabels[i] = label;
+
+        HBox row = new HBox(6);
+        row.setStyle("-fx-alignment: center-left;");
+
+        if (editableMass[i]) {
+            TextField massField = new TextField(String.format("%.2f", mass.get(i)));
+            massField.setTooltip(new Tooltip("Mass"));
+            massField.setPrefWidth(72);
+            massField.setStyle("-fx-font-family: monospace; -fx-font-size: 11px; -fx-background-color: #1d1d28; -fx-text-fill: #ffffff; -fx-border-color: #444455;");
+            massField.setOnAction(_ -> applyMassField(i));
+            massField.focusedProperty().addListener((_, _, focused) -> {
+                if (!focused) {
+                    applyMassField(i);
+                }
+            });
+            massFields[i] = massField;
+            Label massPrefix = new Label("M:");
+            massPrefix.setStyle("-fx-text-fill: #ffffff; -fx-font-family: monospace; -fx-font-size: 11px;");
+            row.getChildren().addAll(label, massPrefix, massField);
+        } else {
+            row.getChildren().add(label);
+        }
+
+        return row;
+    }
+
+    private void applyMassField(int i) {
+        TextField massField = massFields[i];
+        if (massField == null) {
+            return;
+        }
+
+        try {
+            float newMass = Math.max(0.1f, Float.parseFloat(massField.getText().trim().replace(',', '.')));
+            mass.set(i, newMass);
+            radius.set(i, radiusForCreatedMass(newMass));
+            massField.setText(String.format("%.2f", newMass));
+        } catch (NumberFormatException e) {
+            massField.setText(String.format("%.2f", mass.get(i)));
+        }
+    }
+
+    private float radiusForCreatedMass(float bodyMass) {
+        return Math.min(MAX_CREATED_BODY_RADIUS, (float) Math.max(3.0, 4.0 + Math.pow(bodyMass, 1.0 / 3.0) * 1.8));
     }
 
     private String toHex(Color c) {
@@ -284,6 +477,11 @@ public class GravityGPU extends Application {
 
         for (int i = 0; i < MAX_BODIES; i++) {
             activeState.set(i, 0);
+            collisionTarget.set(i, -1);
+            editableMass[i] = false;
+            dashboardRows[i] = null;
+            dashboardLabels[i] = null;
+            massFields[i] = null;
             trailX.get(i).clear();
             trailY.get(i).clear();
         }
@@ -292,7 +490,7 @@ public class GravityGPU extends Application {
         float cy = HEIGHT / 2.0f;
 
         // Sun
-        addBody("Sun", cx, cy, 0, 0, SUN_MASS, 16, Color.GOLD);
+        addBody("Sun", cx, cy, 0, 0, SUN_MASS, 16, Color.GOLD, false);
 
         // Planets
         addKeplerPlanet("Mercury", cx, cy, 55.0f,  0.055f, 3.0f, Color.GRAY);
@@ -316,10 +514,10 @@ public class GravityGPU extends Application {
 
     private void addKeplerPlanet(String name, float cx, float cy, float orbitR, float m, float size, Color color) {
         float v = (float) Math.sqrt(G * (SUN_MASS + m) / orbitR);
-        addBody(name, cx + orbitR, cy, 0, v, m, size, color);
+        addBody(name, cx + orbitR, cy, 0, v, m, size, color, false);
     }
 
-    private void addBody(String name, float x, float y, float vx, float vy, float m, float r, Color color) {
+    private void addBody(String name, float x, float y, float vx, float vy, float m, float r, Color color, boolean canEditMass) {
         if (bodyCount >= MAX_BODIES) return;
 
         int i = bodyCount;
@@ -329,6 +527,7 @@ public class GravityGPU extends Application {
         accX.set(i, 0); accY.set(i, 0);
         mass.set(i, m); radius.set(i, r);
         bodyColors[i] = color;
+        editableMass[i] = canEditMass;
         activeState.set(i, 1);
 
         bodyCount++;

@@ -24,8 +24,8 @@ public class HeatDistributionConstantHeatersFX extends Application {
     private final float[] gridA = new float[DIM * DIM];
     private final float[] gridB = new float[DIM * DIM];
 
-    // Mask array: true means a permanent heater is located at that point.
-    private final boolean[] heatSourcesMask = new boolean[DIM * DIM];
+    // Mask array: 1 means a permanent heater is located at that point.
+    private final int[] heatSourcesMask = new int[DIM * DIM];
 
     private TornadoExecutionPlan planAtoB;
     private TornadoExecutionPlan planBtoA;
@@ -37,10 +37,15 @@ public class HeatDistributionConstantHeatersFX extends Application {
     private double mouseX = -1;
     private double mouseY = -1;
 
-    public static void computeHeatStep(float[] current, float[] next, int dim, float alpha) {
+    public static void computeHeatStep(float[] current, float[] next, int[] heatMask, int dim, float alpha) {
         for (@Parallel int i = 1; i < dim - 1; i++) {
             for (@Parallel int j = 1; j < dim - 1; j++) {
                 int idx = i * dim + j;
+                if (heatMask[idx] == 1) {
+                    next[idx] = 100.0f;
+                    continue;
+                }
+
                 int top = (i - 1) * dim + j;
                 int bottom = (i + 1) * dim + j;
                 int left = i * dim + (j - 1);
@@ -55,6 +60,45 @@ public class HeatDistributionConstantHeatersFX extends Application {
         }
     }
 
+    public static void renderHeatPixels(float[] grid, int[] output, int size) {
+        for (@Parallel int i = 0; i < size; i++) {
+            float temp = grid[i];
+            if (temp < 0.0f) {
+                temp = 0.0f;
+            } else if (temp > 100.0f) {
+                temp = 100.0f;
+            }
+
+            float norm = temp / 100.0f;
+            float red = norm * 2.0f - 0.5f;
+            float green = norm * 3.0f - 2.0f;
+            float blue = 1.0f - norm * 2.0f;
+
+            if (red < 0.0f) {
+                red = 0.0f;
+            } else if (red > 1.0f) {
+                red = 1.0f;
+            }
+
+            if (green < 0.0f) {
+                green = 0.0f;
+            } else if (green > 1.0f) {
+                green = 1.0f;
+            }
+
+            if (blue < 0.0f) {
+                blue = 0.0f;
+            } else if (blue > 1.0f) {
+                blue = 1.0f;
+            }
+
+            int r = (int) (red * 255.0f);
+            int g = (int) (green * 255.0f);
+            int b = (int) (blue * 255.0f);
+            output[i] = (0xFF << 24) | (r << 16) | (g << 8) | b;
+        }
+    }
+
     @Override
     public void start(Stage primaryStage) {
         // 1. Place one permanent heater in the center by default.
@@ -62,15 +106,17 @@ public class HeatDistributionConstantHeatersFX extends Application {
 
         // 2. Create TornadoVM execution plans.
         TaskGraph tgAtoB = new TaskGraph("tgAtoB")
-                .transferToDevice(DataTransferMode.EVERY_EXECUTION, gridA)
-                .task("taskAtoB", HeatDistributionConstantHeatersFX::computeHeatStep, gridA, gridB, DIM, ALPHA)
-                .transferToHost(DataTransferMode.EVERY_EXECUTION, gridB);
+                .transferToDevice(DataTransferMode.EVERY_EXECUTION, gridA, heatSourcesMask)
+                .task("taskAtoB", HeatDistributionConstantHeatersFX::computeHeatStep, gridA, gridB, heatSourcesMask, DIM, ALPHA)
+                .task("renderB", HeatDistributionConstantHeatersFX::renderHeatPixels, gridB, pixelBuffer, DIM * DIM)
+                .transferToHost(DataTransferMode.EVERY_EXECUTION, gridB, pixelBuffer);
         planAtoB = new TornadoExecutionPlan(tgAtoB.snapshot());
 
         TaskGraph tgBtoA = new TaskGraph("tgBtoA")
-                .transferToDevice(DataTransferMode.EVERY_EXECUTION, gridB)
-                .task("taskBtoA", HeatDistributionConstantHeatersFX::computeHeatStep, gridB, gridA, DIM, ALPHA)
-                .transferToHost(DataTransferMode.EVERY_EXECUTION, gridA);
+                .transferToDevice(DataTransferMode.EVERY_EXECUTION, gridB, heatSourcesMask)
+                .task("taskBtoA", HeatDistributionConstantHeatersFX::computeHeatStep, gridB, gridA, heatSourcesMask, DIM, ALPHA)
+                .task("renderA", HeatDistributionConstantHeatersFX::renderHeatPixels, gridA, pixelBuffer, DIM * DIM)
+                .transferToHost(DataTransferMode.EVERY_EXECUTION, gridA, pixelBuffer);
         planBtoA = new TornadoExecutionPlan(tgBtoA.snapshot());
 
         WritableImage writableImage = new WritableImage(DIM, DIM);
@@ -105,9 +151,6 @@ public class HeatDistributionConstantHeatersFX extends Application {
 
                 // Run the simulation loop.
                 for (int step = 0; step < STEPS_PER_FRAME; step++) {
-                    // Keep heater temperatures fixed before invoking the GPU.
-                    applyHeatSources();
-
                     if (useAtoB) {
                         planAtoB.execute();
                     } else {
@@ -117,7 +160,7 @@ public class HeatDistributionConstantHeatersFX extends Application {
                 }
 
                 // Refresh the image for the selected buffer.
-                updateImageView(useAtoB ? gridA : gridB);
+                updateImageView();
             }
         };
         timer.start();
@@ -148,7 +191,7 @@ public class HeatDistributionConstantHeatersFX extends Application {
                 if (px > 0 && px < DIM - 1 && py > 0 && py < DIM - 1) {
                     if (i * i + j * j <= radius * radius) {
                         int idx = py * DIM + px;
-                        heatSourcesMask[idx] = true;
+                        heatSourcesMask[idx] = 1;
                         gridA[idx] = 100.0f;
                         gridB[idx] = 100.0f;
                     }
@@ -157,29 +200,7 @@ public class HeatDistributionConstantHeatersFX extends Application {
         }
     }
 
-    private void applyHeatSources() {
-        // Force a constant temperature of 100 degrees C on all installed heaters.
-        for (int i = 0; i < DIM * DIM; i++) {
-            if (heatSourcesMask[i]) {
-                gridA[i] = 100.0f;
-                gridB[i] = 100.0f;
-            }
-        }
-    }
-
-    private void updateImageView(float[] activeGrid) {
-        for (int i = 0; i < DIM * DIM; i++) {
-            float temp = Math.clamp(activeGrid[i], 0.0f, 100.0f);
-            float norm = temp / 100.0f;
-
-            // Color palette: black (cold) -> blue -> red -> yellow (hot).
-            int r = (int) (Math.clamp(norm * 2.0f - 0.5f, 0.0f, 1.0f) * 255);
-            int g = (int) (Math.clamp(norm * 3.0f - 2.0f, 0.0f, 1.0f) * 255);
-            int b = (int) (Math.clamp(1.0f - norm * 2.0f, 0.0f, 1.0f) * 255);
-
-            pixelBuffer[i] = (0xFF << 24) | (r << 16) | (g << 8) | b;
-        }
-
+    private void updateImageView() {
         pixelWriter.setPixels(0, 0, DIM, DIM,
                 PixelFormat.getIntArgbInstance(),
                 pixelBuffer, 0, DIM);

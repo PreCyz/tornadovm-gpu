@@ -51,6 +51,45 @@ public class HeatDistributionFX extends Application {
         }
     }
 
+    public static void renderHeatPixels(float[] grid, int[] output, int size) {
+        for (@Parallel int i = 0; i < size; i++) {
+            float temp = grid[i];
+            if (temp < 0.0f) {
+                temp = 0.0f;
+            } else if (temp > 100.0f) {
+                temp = 100.0f;
+            }
+
+            float norm = temp / 100.0f;
+            float red = norm * 2.0f - 0.5f;
+            float green = norm * 3.0f - 2.0f;
+            float blue = 1.0f - norm * 2.0f;
+
+            if (red < 0.0f) {
+                red = 0.0f;
+            } else if (red > 1.0f) {
+                red = 1.0f;
+            }
+
+            if (green < 0.0f) {
+                green = 0.0f;
+            } else if (green > 1.0f) {
+                green = 1.0f;
+            }
+
+            if (blue < 0.0f) {
+                blue = 0.0f;
+            } else if (blue > 1.0f) {
+                blue = 1.0f;
+            }
+
+            int r = (int) (red * 255.0f);
+            int g = (int) (green * 255.0f);
+            int b = (int) (blue * 255.0f);
+            output[i] = (0xFF << 24) | (r << 16) | (g << 8) | b;
+        }
+    }
+
     @Override
     public void start(Stage primaryStage) {
         initHeatSources();
@@ -59,13 +98,15 @@ public class HeatDistributionFX extends Application {
         TaskGraph tgAtoB = new TaskGraph("tgAtoB")
                 .transferToDevice(DataTransferMode.EVERY_EXECUTION, gridA)
                 .task("taskAtoB", HeatDistributionFX::computeHeatStep, gridA, gridB, DIM, ALPHA)
-                .transferToHost(DataTransferMode.EVERY_EXECUTION, gridB);
+                .task("renderB", HeatDistributionFX::renderHeatPixels, gridB, pixelBuffer, DIM * DIM)
+                .transferToHost(DataTransferMode.EVERY_EXECUTION, gridB, pixelBuffer);
         planAtoB = new TornadoExecutionPlan(tgAtoB.snapshot());
 
         TaskGraph tgBtoA = new TaskGraph("tgBtoA")
                 .transferToDevice(DataTransferMode.EVERY_EXECUTION, gridB)
                 .task("taskBtoA", HeatDistributionFX::computeHeatStep, gridB, gridA, DIM, ALPHA)
-                .transferToHost(DataTransferMode.EVERY_EXECUTION, gridA);
+                .task("renderA", HeatDistributionFX::renderHeatPixels, gridA, pixelBuffer, DIM * DIM)
+                .transferToHost(DataTransferMode.EVERY_EXECUTION, gridA, pixelBuffer);
         planBtoA = new TornadoExecutionPlan(tgBtoA.snapshot());
 
         WritableImage writableImage = new WritableImage(DIM, DIM);
@@ -106,7 +147,7 @@ public class HeatDistributionFX extends Application {
                     useAtoB = !useAtoB;
                 }
 
-                updateImageView(useAtoB ? gridA : gridB);
+                updateImageView();
             }
         };
         timer.start();
@@ -154,19 +195,7 @@ public class HeatDistributionFX extends Application {
         }
     }
 
-    private void updateImageView(float[] activeGrid) {
-        for (int i = 0; i < DIM * DIM; i++) {
-            float temp = Math.clamp(activeGrid[i], 0.0f, 100.0f);
-            float norm = temp / 100.0f;
-
-            // Smooth temperature gradient: black -> blue -> red -> yellow -> white.
-            int r = (int) (Math.clamp(norm * 2.0f - 0.5f, 0.0f, 1.0f) * 255);
-            int g = (int) (Math.clamp(norm * 3.0f - 2.0f, 0.0f, 1.0f) * 255);
-            int b = (int) (Math.clamp(1.0f - norm * 2.0f, 0.0f, 1.0f) * 255);
-
-            pixelBuffer[i] = (0xFF << 24) | (r << 16) | (g << 8) | b;
-        }
-
+    private void updateImageView() {
         pixelWriter.setPixels(0, 0, DIM, DIM,
                 javafx.scene.image.PixelFormat.getIntArgbInstance(),
                 pixelBuffer, 0, DIM);

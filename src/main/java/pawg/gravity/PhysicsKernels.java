@@ -69,4 +69,38 @@ class PhysicsKernels {
             py.set(i, py.get(i) + vyi * dt);
         }
     }
+
+    static void detectCollisions(
+            FloatArray px, FloatArray py,
+            IntArray active,
+            IntArray collisionTarget,
+            float centerCollisionEpsilon) {
+
+        int numBodies = px.getSize();
+
+        for (@Parallel int i = 0; i < numBodies; i++) {
+            collisionTarget.set(i, -1);
+            if (active.get(i) == 0) continue;
+
+            float pxi = px.get(i);
+            float pyi = py.get(i);
+            int target = -1;
+            float centerCollisionEpsilonSq = centerCollisionEpsilon * centerCollisionEpsilon;
+
+            for (int j = 0; j < numBodies; j++) {
+                if (i == j || active.get(j) == 0) continue;
+
+                float dx = px.get(j) - pxi;
+                float dy = py.get(j) - pyi;
+
+                if (dx * dx + dy * dy <= centerCollisionEpsilonSq) {
+                    if (target == -1 || j < target) {
+                        target = j;
+                    }
+                }
+            }
+
+            collisionTarget.set(i, target);
+        }
+    }
 }

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Use IntelliJ pwsh"
+  short_description: "Prefer IntelliJ terminal for pwsh commands"
+  default_prompt: "Use $use-intellij-pwsh to run terminal commands through IntelliJ IDEA's integrated PowerShell terminal when the IntelliJ MCP is available."

@@ -144,6 +144,11 @@ public class SolarSystemGPU extends Application {
                 // 8. Uranus (light blue/turquoise)
                 else if (distUranSq <= uranRSq) {
                     output[idx] = 0xFF4FD0E7;
+                } else if (((x - uranX) * (x - uranX)) / (4.0f * 4.0f) +
+                        ((y - uranY) * (y - uranY)) / (20.0f * 20.0f) <= 1.0f &&
+                        ((x - uranX) * (x - uranX)) / (2.2f * 2.2f) +
+                                ((y - uranY) * (y - uranY)) / (17.0f * 17.0f) >= 1.0f) {
+                    output[idx] = 0xAA9EDDE8;
                 }
                 // 9. Neptune (dark blue)
                 else if (distNepSq <= nepRSq) {
