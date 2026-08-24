@@ -18,6 +18,7 @@ public class Launcher {
                 case "5" -> Application.launch(SolarSystemGPU.class, args);
                 case "6" -> Application.launch(GravitySystemCPU.class, args);
                 case "7" -> Application.launch(GravityGPU.class, args);
+                default -> Application.launch(GameOfLifeInteractive.class, args);
             }
         } else {
             Application.launch(GameOfLifeInteractive.class, args);
