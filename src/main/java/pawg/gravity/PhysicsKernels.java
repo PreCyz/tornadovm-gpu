@@ -7,31 +7,42 @@ import uk.ac.manchester.tornado.api.types.arrays.IntArray;
 
 class PhysicsKernels {
 
-    static void computeForces(
-            FloatArray px, FloatArray py,
-            FloatArray ax, FloatArray ay,
-            FloatArray m, IntArray active,
-            FloatArray params) {
-
-        float gConst = params.get(0);
-        int numBodies = px.getSize();
+    static void clearCollisionTargets(IntArray collisionTarget, IntArray simulationState) {
+        int numBodies = simulationState.get(0);
 
         for (@Parallel int i = 0; i < numBodies; i++) {
-            int actI = active.get(i);
-            if (actI == 0) continue;
+            collisionTarget.set(i, -1);
+        }
+    }
+
+    static void integrateStep(
+            FloatArray srcPx, FloatArray srcPy,
+            FloatArray srcVx, FloatArray srcVy,
+            FloatArray dstPx, FloatArray dstPy,
+            FloatArray dstVx, FloatArray dstVy,
+            FloatArray ax, FloatArray ay,
+            FloatArray m, IntArray active,
+            FloatArray params, IntArray simulationState) {
+
+        float gConst = params.get(0);
+        float dt = params.get(1);
+        int numBodies = simulationState.get(0);
+
+        for (@Parallel int i = 0; i < numBodies; i++) {
+            if (active.get(i) == 0) continue;
 
             float fx = 0.0f;
             float fy = 0.0f;
 
-            float pxi = px.get(i);
-            float pyi = py.get(i);
+            float pxi = srcPx.get(i);
+            float pyi = srcPy.get(i);
             float mi = m.get(i);
 
             for (int j = 0; j < numBodies; j++) {
                 if (active.get(j) == 0) continue;
 
-                float dx = px.get(j) - pxi;
-                float dy = py.get(j) - pyi;
+                float dx = srcPx.get(j) - pxi;
+                float dy = srcPy.get(j) - pyi;
 
                 float distSq = dx * dx + dy * dy + 35.0f;
                 float dist = TornadoMath.sqrt(distSq);
@@ -42,31 +53,17 @@ class PhysicsKernels {
                 fy += force * (dy / dist);
             }
 
-            ax.set(i, fx / mi);
-            ay.set(i, fy / mi);
-        }
-    }
+            float axi = fx / mi;
+            float ayi = fy / mi;
+            float vxi = srcVx.get(i) + axi * dt;
+            float vyi = srcVy.get(i) + ayi * dt;
 
-    static void integrateMotion(
-            FloatArray px, FloatArray py,
-            FloatArray vx, FloatArray vy,
-            FloatArray ax, FloatArray ay,
-            IntArray active, FloatArray params) {
-
-        float dt = params.get(1);
-        int numBodies = px.getSize();
-
-        for (@Parallel int i = 0; i < numBodies; i++) {
-            if (active.get(i) == 0) continue;
-
-            float vxi = vx.get(i) + ax.get(i) * dt;
-            float vyi = vy.get(i) + ay.get(i) * dt;
-
-            vx.set(i, vxi);
-            vy.set(i, vyi);
-
-            px.set(i, px.get(i) + vxi * dt);
-            py.set(i, py.get(i) + vyi * dt);
+            ax.set(i, axi);
+            ay.set(i, ayi);
+            dstVx.set(i, vxi);
+            dstVy.set(i, vyi);
+            dstPx.set(i, pxi + vxi * dt);
+            dstPy.set(i, pyi + vyi * dt);
         }
     }
 
@@ -74,12 +71,12 @@ class PhysicsKernels {
             FloatArray px, FloatArray py,
             IntArray active,
             IntArray collisionTarget,
-            float centerCollisionEpsilon) {
+            float centerCollisionEpsilon,
+            IntArray simulationState) {
 
-        int numBodies = px.getSize();
+        int numBodies = simulationState.get(0);
 
         for (@Parallel int i = 0; i < numBodies; i++) {
-            collisionTarget.set(i, -1);
             if (active.get(i) == 0) continue;
 
             float pxi = px.get(i);
@@ -100,7 +97,9 @@ class PhysicsKernels {
                 }
             }
 
-            collisionTarget.set(i, target);
+            if (target != -1) {
+                collisionTarget.set(i, target);
+            }
         }
     }
 }

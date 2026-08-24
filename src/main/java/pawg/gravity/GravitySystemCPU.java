@@ -157,7 +157,7 @@ public class GravitySystemCPU extends Application {
         title.setStyle("-fx-text-fill: #ffffff; -fx-font-weight: bold; -fx-font-size: 14px;");
 
         Button btnReset = new Button("RESET (SPACE)");
-        btnReset.setStyle("-fx-background-color: #222; -fx-text-fill: #ff4444; -fx-border-color: #ff4444; -fx-font-weight: bold; -fx-cursor: hand; -fx-max-width: Infinity;");
+        btnReset.setStyle("-fx-background-color: #222; -fx-text-fill: #ff4444; -fx-border-color: #ff4444; -fx-font-weight: bold; -fx-cursor: hand;");
         btnReset.setFocusTraversable(false);
         btnReset.setOnAction(_ -> resetSystem());
 

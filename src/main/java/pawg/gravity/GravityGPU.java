@@ -27,7 +27,7 @@ import java.util.List;
 public class GravityGPU extends Application {
 
     private static final int CANVAS_WIDTH = 1250;
-    private static final int SIDEBAR_WIDTH = 380;
+    private static final int SIDEBAR_WIDTH = 430;
     private static final int HEIGHT = 880;
     private static final int MAX_BODIES = 1024;
 
@@ -39,11 +39,16 @@ public class GravityGPU extends Application {
     private static final float VELOCITY_SCALE = 0.085f;
     private static final float MAX_CREATED_BODY_RADIUS = 20.0f;
     private static final float CENTER_COLLISION_EPSILON = 0.5f;
+    private static final int GPU_SUB_STEPS = 8;
 
     private final FloatArray posX = new FloatArray(MAX_BODIES);
     private final FloatArray posY = new FloatArray(MAX_BODIES);
     private final FloatArray velX = new FloatArray(MAX_BODIES);
     private final FloatArray velY = new FloatArray(MAX_BODIES);
+    private final FloatArray nextPosX = new FloatArray(MAX_BODIES);
+    private final FloatArray nextPosY = new FloatArray(MAX_BODIES);
+    private final FloatArray nextVelX = new FloatArray(MAX_BODIES);
+    private final FloatArray nextVelY = new FloatArray(MAX_BODIES);
     private final FloatArray accX = new FloatArray(MAX_BODIES);
     private final FloatArray accY = new FloatArray(MAX_BODIES);
     private final FloatArray mass = new FloatArray(MAX_BODIES);
@@ -52,6 +57,7 @@ public class GravityGPU extends Application {
     private final IntArray collisionTarget = new IntArray(MAX_BODIES);
 
     private final FloatArray physParams = new FloatArray(2);
+    private final IntArray simulationState = new IntArray(1);
 
     private final String[] bodyNames = new String[MAX_BODIES];
     private final Color[] bodyColors = new Color[MAX_BODIES];
@@ -151,15 +157,24 @@ public class GravityGPU extends Application {
         VBox sidebar = new VBox(10);
         sidebar.setStyle(String.format("-fx-background-color: #111118; -fx-padding: 15; -fx-min-width: %dpx; -fx-pref-width: %dpx; -fx-border-color: #333344; -fx-border-width: 0 0 0 1;", SIDEBAR_WIDTH, SIDEBAR_WIDTH));
 
-        Label title = new Label("GPU DASHBOARD (TornadoVM)");
+        Label title = new Label("NBody DASHBOARD");
         title.setStyle("-fx-text-fill: #00ff88; -fx-font-weight: bold; -fx-font-size: 13px;");
 
         Button btnReset = new Button("RESET (SPACE)");
-        btnReset.setStyle("-fx-background-color: #222; -fx-text-fill: #ff4444; -fx-border-color: #ff4444; -fx-font-weight: bold; -fx-cursor: hand; -fx-max-width: Infinity;");
+        btnReset.setStyle("-fx-background-color: #222; -fx-text-fill: #ff4444; -fx-border-color: #ff4444; -fx-font-weight: bold; -fx-cursor: hand;");
         btnReset.setFocusTraversable(false);
         btnReset.setOnAction(_ -> resetSystem());
 
-        sidebar.getChildren().addAll(title, btnReset, dashboardList);
+        Label legend = new Label("""
+                M = mass
+                R = body radius
+                V = speed
+                A = acceleration
+                X/Y = position
+                Nearest = closest body and distance""");
+        legend.setStyle("-fx-text-fill: #b8b8c8; -fx-font-family: monospace; -fx-font-size: 11px; -fx-padding: 0 0 6 0;");
+
+        sidebar.getChildren().addAll(title, btnReset, legend, dashboardList);
 
         BorderPane root = new BorderPane();
         root.setCenter(canvas);
@@ -187,11 +202,9 @@ public class GravityGPU extends Application {
 
             @Override
             public void handle(long now) {
-                int subSteps = 8;
-                for (int step = 0; step < subSteps; step++) {
-                    executionPlan.execute();
-                    resolveCollisions();
-                }
+                updateSimulationState();
+                executionPlan.execute();
+                resolveCollisions();
 
                 frameCounter++;
                 if (frameCounter % 2 == 0) {
@@ -224,6 +237,8 @@ public class GravityGPU extends Application {
                     for (int k = 0; k < tx.size() - 1; k++) {
                         gc.strokeLine(tx.get(k), ty.get(k), tx.get(k+1), ty.get(k+1));
                     }
+
+                    drawPlanetRings(gc, i);
 
                     gc.setFill(bodyColors[i]);
                     gc.fillOval(posX.get(i) - radius.get(i), posY.get(i) - radius.get(i), radius.get(i) * 2, radius.get(i) * 2);
@@ -266,15 +281,85 @@ public class GravityGPU extends Application {
         timer.start();
     }
 
+    private void drawPlanetRings(GraphicsContext gc, int bodyIndex) {
+        String name = bodyNames[bodyIndex];
+        if (name == null) {
+            return;
+        }
+
+        if (name.startsWith("Saturn")) {
+            drawSaturnRings(gc, posX.get(bodyIndex), posY.get(bodyIndex), radius.get(bodyIndex));
+        } else if (name.startsWith("Uranus")) {
+            drawUranusVerticalRing(gc, posX.get(bodyIndex), posY.get(bodyIndex), radius.get(bodyIndex));
+        }
+    }
+
+    private void drawSaturnRings(GraphicsContext gc, float x, float y, float bodyRadius) {
+        double outerWidth = bodyRadius * 4.8;
+        double outerHeight = bodyRadius * 1.45;
+        double middleWidth = bodyRadius * 4.0;
+        double middleHeight = bodyRadius * 1.15;
+        double innerWidth = bodyRadius * 3.2;
+        double innerHeight = bodyRadius * 0.9;
+
+        gc.setLineWidth(1.5);
+        gc.setStroke(Color.rgb(212, 178, 124, 0.75));
+        gc.strokeOval(x - outerWidth / 2.0, y - outerHeight / 2.0, outerWidth, outerHeight);
+
+        gc.setLineWidth(1.0);
+        gc.setStroke(Color.rgb(169, 126, 74, 0.65));
+        gc.strokeOval(x - middleWidth / 2.0, y - middleHeight / 2.0, middleWidth, middleHeight);
+
+        gc.setStroke(Color.rgb(74, 59, 37, 0.45));
+        gc.strokeOval(x - innerWidth / 2.0, y - innerHeight / 2.0, innerWidth, innerHeight);
+    }
+
+    private void drawUranusVerticalRing(GraphicsContext gc, float x, float y, float bodyRadius) {
+        double ringWidth = bodyRadius * 1.15;
+        double ringHeight = bodyRadius * 5.0;
+
+        gc.setLineWidth(1.4);
+        gc.setStroke(Color.rgb(158, 221, 232, 0.7));
+        gc.strokeOval(x - ringWidth / 2.0, y - ringHeight / 2.0, ringWidth, ringHeight);
+
+        gc.setLineWidth(0.8);
+        gc.setStroke(Color.rgb(210, 245, 250, 0.45));
+        gc.strokeOval(x - ringWidth * 0.72 / 2.0, y - ringHeight * 0.86 / 2.0, ringWidth * 0.72, ringHeight * 0.86);
+    }
+
     private void initTornadoPlanOnce() {
         TaskGraph taskGraph = new TaskGraph("nbody")
-                .transferToDevice(DataTransferMode.EVERY_EXECUTION, posX, posY, velX, velY, accX, accY, mass, activeState, physParams)
-                .task("computeForces", PhysicsKernels::computeForces, posX, posY, accX, accY, mass, activeState, physParams)
-                .task("integrateMotion", PhysicsKernels::integrateMotion, posX, posY, velX, velY, accX, accY, activeState, physParams)
-                .task("detectCollisions", PhysicsKernels::detectCollisions, posX, posY, activeState, collisionTarget, CENTER_COLLISION_EPSILON)
-                .transferToHost(DataTransferMode.EVERY_EXECUTION, posX, posY, velX, velY, collisionTarget);
+                .transferToDevice(DataTransferMode.EVERY_EXECUTION, posX, posY, velX, velY, mass, activeState, physParams, simulationState)
+                .transferToDevice(DataTransferMode.FIRST_EXECUTION, nextPosX, nextPosY, nextVelX, nextVelY)
+                .task("clearCollisionTargets", PhysicsKernels::clearCollisionTargets, collisionTarget, simulationState);
+
+        for (int step = 0; step < GPU_SUB_STEPS; step++) {
+            boolean evenStep = step % 2 == 0;
+            FloatArray sourcePosX = evenStep ? posX : nextPosX;
+            FloatArray sourcePosY = evenStep ? posY : nextPosY;
+            FloatArray sourceVelX = evenStep ? velX : nextVelX;
+            FloatArray sourceVelY = evenStep ? velY : nextVelY;
+            FloatArray targetPosX = evenStep ? nextPosX : posX;
+            FloatArray targetPosY = evenStep ? nextPosY : posY;
+            FloatArray targetVelX = evenStep ? nextVelX : velX;
+            FloatArray targetVelY = evenStep ? nextVelY : velY;
+
+            taskGraph
+                    .task("integrateStep" + step, PhysicsKernels::integrateStep,
+                            sourcePosX, sourcePosY, sourceVelX, sourceVelY,
+                            targetPosX, targetPosY, targetVelX, targetVelY,
+                            accX, accY, mass, activeState, physParams, simulationState)
+                    .task("detectCollisions" + step, PhysicsKernels::detectCollisions,
+                            targetPosX, targetPosY, activeState, collisionTarget, CENTER_COLLISION_EPSILON, simulationState);
+        }
+
+        taskGraph.transferToHost(DataTransferMode.EVERY_EXECUTION, posX, posY, velX, velY, collisionTarget);
 
         executionPlan = new TornadoExecutionPlan(taskGraph.snapshot());
+    }
+
+    private void updateSimulationState() {
+        simulationState.set(0, bodyCount);
     }
 
     private void resolveCollisions() {
@@ -396,6 +481,11 @@ public class GravityGPU extends Application {
 
         for (int i = 0; i < bodyCount; i++) {
             float speed = (float) Math.sqrt(velX.get(i) * velX.get(i) + velY.get(i) * velY.get(i));
+            float acceleration = (float) Math.sqrt(accX.get(i) * accX.get(i) + accY.get(i) * accY.get(i));
+            int nearestIndex = findNearestBodyIndex(i);
+            String nearestText = nearestIndex < 0
+                    ? "Nearest: -"
+                    : String.format("Nearest: %s %.1fpx", bodyNames[nearestIndex], distanceBetween(i, nearestIndex));
             HBox row = dashboardRows[i];
             Label label = dashboardLabels[i];
 
@@ -406,13 +496,23 @@ public class GravityGPU extends Application {
             }
 
             if (editableMass[i]) {
-                label.setText(String.format("%-10s | V: %.2f", bodyNames[i], speed));
+                label.setText(String.format(
+                        "%-10s | R:%4.1f%nV:%7.2f | A:%7.3f | X:%6.1f Y:%6.1f%n%s",
+                        bodyNames[i], radius.get(i),
+                        speed, acceleration, posX.get(i), posY.get(i),
+                        nearestText
+                ));
                 TextField massField = massFields[i];
                 if (!massField.isFocused()) {
                     massField.setText(String.format("%.2f", mass.get(i)));
                 }
             } else {
-                label.setText(String.format("%-10s | M: %-6.2f | V: %.2f", bodyNames[i], mass.get(i), speed));
+                label.setText(String.format(
+                        "%-10s | M:%8.2f | R:%4.1f%nV:%7.2f | A:%7.3f | X:%6.1f Y:%6.1f%n%s",
+                        bodyNames[i], mass.get(i), radius.get(i),
+                        speed, acceleration, posX.get(i), posY.get(i),
+                        nearestText
+                ));
             }
 
             if (dashboardList.getChildren().size() <= i) {
@@ -452,6 +552,35 @@ public class GravityGPU extends Application {
         }
 
         return row;
+    }
+
+    private int findNearestBodyIndex(int bodyIndex) {
+        int nearestIndex = -1;
+        float nearestDistanceSq = Float.MAX_VALUE;
+        float bodyX = posX.get(bodyIndex);
+        float bodyY = posY.get(bodyIndex);
+
+        for (int otherIndex = 0; otherIndex < bodyCount; otherIndex++) {
+            if (otherIndex == bodyIndex) {
+                continue;
+            }
+
+            float dx = posX.get(otherIndex) - bodyX;
+            float dy = posY.get(otherIndex) - bodyY;
+            float distanceSq = dx * dx + dy * dy;
+            if (distanceSq < nearestDistanceSq) {
+                nearestDistanceSq = distanceSq;
+                nearestIndex = otherIndex;
+            }
+        }
+
+        return nearestIndex;
+    }
+
+    private float distanceBetween(int firstIndex, int secondIndex) {
+        float dx = posX.get(secondIndex) - posX.get(firstIndex);
+        float dy = posY.get(secondIndex) - posY.get(firstIndex);
+        return (float) Math.sqrt(dx * dx + dy * dy);
     }
 
     private void applyMassField(int i) {
