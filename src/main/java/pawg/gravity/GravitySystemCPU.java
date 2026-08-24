@@ -162,12 +162,12 @@ public class GravitySystemCPU extends Application {
         btnReset.setOnAction(_ -> resetSystem());
 
         Label legend = new Label("""
-                M = mass
-                R = body radius
-                V = speed
-                A = acceleration
-                X/Y = position
-                Nearest = closest body and distance""");
+                M = mass [M_Earth]
+                R = body radius [px]
+                V = speed [px/s]
+                A = acceleration [px/s²]
+                X/Y = position [px]
+                Nearest = closest body and distance [px]""");
         legend.setStyle("-fx-text-fill: #b8b8c8; -fx-font-family: monospace; -fx-font-size: 11px; -fx-padding: 0 0 6 0;");
 
         sidebar.getChildren().addAll(title, btnReset, legend, dashboardList);

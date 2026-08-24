@@ -40,6 +40,13 @@ public class GravityGPU extends Application {
     private static final float MAX_CREATED_BODY_RADIUS = 20.0f;
     private static final float CENTER_COLLISION_EPSILON = 0.5f;
     private static final int GPU_SUB_STEPS = 8;
+    private static final float HABITABLE_ZONE_INNER_RADIUS = 115.0f;
+    private static final float HABITABLE_ZONE_OUTER_RADIUS = 165.0f;
+    private static final float HABITABLE_ZONE_MIN_SCALE = 0.35f;
+    private static final float HABITABLE_ZONE_MAX_SCALE = 3.0f;
+    private static final float ASTEROID_BELT_INNER_RADIUS = 205.0f;
+    private static final float ASTEROID_BELT_OUTER_RADIUS = 232.0f;
+    private static final int ASTEROID_COUNT = 180;
 
     private final FloatArray posX = new FloatArray(MAX_BODIES);
     private final FloatArray posY = new FloatArray(MAX_BODIES);
@@ -65,6 +72,7 @@ public class GravityGPU extends Application {
     private final HBox[] dashboardRows = new HBox[MAX_BODIES];
     private final Label[] dashboardLabels = new Label[MAX_BODIES];
     private final TextField[] massFields = new TextField[MAX_BODIES];
+    private final TextField[] velocityFields = new TextField[MAX_BODIES];
     private final List<List<Float>> trailX = new ArrayList<>();
     private final List<List<Float>> trailY = new ArrayList<>();
 
@@ -80,6 +88,8 @@ public class GravityGPU extends Application {
     private float createdRadius = 5.0f;
     private float vectorEndX, vectorEndY;
     private int customBodyCount = 0;
+    private boolean showHabitableZone = false;
+    private boolean showAsteroidBelt = false;
 
     private final VBox dashboardList = new VBox(6);
     private double canvasWidth = CANVAS_WIDTH;
@@ -165,16 +175,28 @@ public class GravityGPU extends Application {
         btnReset.setFocusTraversable(false);
         btnReset.setOnAction(_ -> resetSystem());
 
+        CheckBox habitableZoneCheckbox = new CheckBox("Show golden belt");
+        habitableZoneCheckbox.setSelected(false);
+        habitableZoneCheckbox.setFocusTraversable(false);
+        habitableZoneCheckbox.setStyle("-fx-text-fill: #ffd76a; -fx-font-family: monospace; -fx-font-size: 11px;");
+        habitableZoneCheckbox.selectedProperty().addListener((_, _, selected) -> showHabitableZone = selected);
+
+        CheckBox asteroidBeltCheckbox = new CheckBox("Show asteroid belt");
+        asteroidBeltCheckbox.setSelected(false);
+        asteroidBeltCheckbox.setFocusTraversable(false);
+        asteroidBeltCheckbox.setStyle("-fx-text-fill: #b67a42; -fx-font-family: monospace; -fx-font-size: 11px;");
+        asteroidBeltCheckbox.selectedProperty().addListener((_, _, selected) -> showAsteroidBelt = selected);
+
         Label legend = new Label("""
-                M = mass
-                R = body radius
-                V = speed
-                A = acceleration
-                X/Y = position
-                Nearest = closest body and distance""");
+                M = mass [M_Earth]
+                R = body radius [px]
+                V = speed [px/s]
+                A = acceleration [px/s²]
+                X/Y = position [px]
+                Nearest = closest body and distance [px]""");
         legend.setStyle("-fx-text-fill: #b8b8c8; -fx-font-family: monospace; -fx-font-size: 11px; -fx-padding: 0 0 6 0;");
 
-        sidebar.getChildren().addAll(title, btnReset, legend, dashboardList);
+        sidebar.getChildren().addAll(title, btnReset, habitableZoneCheckbox, asteroidBeltCheckbox, legend, dashboardList);
 
         BorderPane root = new BorderPane();
         root.setCenter(canvas);
@@ -224,6 +246,7 @@ public class GravityGPU extends Application {
 
                 gc.setFill(Color.rgb(3, 3, 10, 0.35));
                 gc.fillRect(0, 0, canvasWidth, canvasHeight);
+                drawSolarBelts(gc, frameCounter);
 
                 gc.setTextAlign(TextAlignment.CENTER);
                 gc.setTextBaseline(VPos.BOTTOM);
@@ -279,6 +302,85 @@ public class GravityGPU extends Application {
             }
         };
         timer.start();
+    }
+
+    private void drawSolarBelts(GraphicsContext gc, int frameCounter) {
+        if (!showHabitableZone && !showAsteroidBelt) {
+            return;
+        }
+
+        int sunIndex = findSunIndex();
+        if (sunIndex < 0) {
+            return;
+        }
+
+        float sunX = posX.get(sunIndex);
+        float sunY = posY.get(sunIndex);
+        float sunMass = mass.get(sunIndex);
+        if (showHabitableZone) {
+            drawHabitableZone(gc, sunX, sunY, sunMass);
+        }
+        if (showAsteroidBelt) {
+            drawAsteroidBelt(gc, sunX, sunY, frameCounter);
+        }
+    }
+
+    private int findSunIndex() {
+        for (int i = 0; i < bodyCount; i++) {
+            String name = bodyNames[i];
+            if (name != null && name.startsWith("Sun")) {
+                return i;
+            }
+        }
+
+        return bodyCount > 0 ? 0 : -1;
+    }
+
+    private void drawHabitableZone(GraphicsContext gc, float sunX, float sunY, float sunMass) {
+        double luminosityScale = habitableZoneScale(sunMass);
+        double innerRadius = HABITABLE_ZONE_INNER_RADIUS * luminosityScale;
+        double outerRadius = HABITABLE_ZONE_OUTER_RADIUS * luminosityScale;
+        double zoneRadius = (innerRadius + outerRadius) / 2.0;
+        double zoneWidth = outerRadius - innerRadius;
+        double diameter = zoneRadius * 2.0;
+
+        gc.setStroke(Color.rgb(255, 190, 55, 0.08));
+        gc.setLineWidth(zoneWidth);
+        gc.strokeOval(sunX - zoneRadius, sunY - zoneRadius, diameter, diameter);
+
+        gc.setStroke(Color.rgb(255, 215, 90, 0.18));
+        gc.setLineWidth(zoneWidth * 0.45);
+        gc.strokeOval(sunX - zoneRadius, sunY - zoneRadius, diameter, diameter);
+
+        gc.setStroke(Color.rgb(255, 235, 160, 0.28));
+        gc.setLineWidth(1.2);
+        gc.strokeOval(sunX - innerRadius, sunY - innerRadius, innerRadius * 2.0, innerRadius * 2.0);
+        gc.strokeOval(sunX - outerRadius, sunY - outerRadius, outerRadius * 2.0, outerRadius * 2.0);
+    }
+
+    private double habitableZoneScale(float sunMass) {
+        double massRatio = Math.max(0.01, sunMass / SUN_MASS);
+        double luminosityRatio = Math.pow(massRatio, 3.5);
+        double radiusScale = Math.sqrt(luminosityRatio);
+        return Math.max(HABITABLE_ZONE_MIN_SCALE, Math.min(HABITABLE_ZONE_MAX_SCALE, radiusScale));
+    }
+
+    private void drawAsteroidBelt(GraphicsContext gc, float sunX, float sunY, int frameCounter) {
+        double rotation = frameCounter * 0.0008;
+        double beltWidth = ASTEROID_BELT_OUTER_RADIUS - ASTEROID_BELT_INNER_RADIUS;
+
+        for (int i = 0; i < ASTEROID_COUNT; i++) {
+            double angle = i * 2.399963229728653 + rotation;
+            double radialNoise = ((i * 37) % 100) / 100.0;
+            double orbitNoise = Math.sin(i * 12.9898) * 0.5 + 0.5;
+            double asteroidRadius = ASTEROID_BELT_INNER_RADIUS + beltWidth * radialNoise + orbitNoise * 2.5;
+            double x = sunX + Math.cos(angle) * asteroidRadius;
+            double y = sunY + Math.sin(angle) * asteroidRadius;
+            double size = 0.8 + ((i * 17) % 9) * 0.12;
+
+            gc.setFill(Color.rgb(143, 91, 43, 0.55 + (((i * 13) % 30) / 100.0)));
+            gc.fillOval(x - size / 2.0, y - size / 2.0, size, size);
+        }
     }
 
     private void drawPlanetRings(GraphicsContext gc, int bodyIndex) {
@@ -451,6 +553,7 @@ public class GravityGPU extends Application {
         dashboardRows[target] = null;
         dashboardLabels[target] = null;
         massFields[target] = null;
+        velocityFields[target] = null;
     }
 
     private void clearBodySlot(int i) {
@@ -472,6 +575,7 @@ public class GravityGPU extends Application {
         dashboardRows[i] = null;
         dashboardLabels[i] = null;
         massFields[i] = null;
+        velocityFields[i] = null;
     }
 
     private void updateDashboard() {
@@ -497,14 +601,18 @@ public class GravityGPU extends Application {
 
             if (editableMass[i]) {
                 label.setText(String.format(
-                        "%-10s | R:%4.1f%nV:%7.2f | A:%7.3f | X:%6.1f Y:%6.1f%n%s",
+                        "%-10s | R:%4.1f%nA:%7.3f | X:%6.1f Y:%6.1f%n%s",
                         bodyNames[i], radius.get(i),
-                        speed, acceleration, posX.get(i), posY.get(i),
+                        acceleration, posX.get(i), posY.get(i),
                         nearestText
                 ));
                 TextField massField = massFields[i];
                 if (!massField.isFocused()) {
                     massField.setText(String.format("%.2f", mass.get(i)));
+                }
+                TextField velocityField = velocityFields[i];
+                if (!velocityField.isFocused()) {
+                    velocityField.setText(String.format("%.2f", speed));
                 }
             } else {
                 label.setText(String.format(
@@ -546,7 +654,22 @@ public class GravityGPU extends Application {
             massFields[i] = massField;
             Label massPrefix = new Label("M:");
             massPrefix.setStyle("-fx-text-fill: #ffffff; -fx-font-family: monospace; -fx-font-size: 11px;");
-            row.getChildren().addAll(label, massPrefix, massField);
+
+            TextField velocityField = new TextField(String.format("%.2f", Math.sqrt(velX.get(i) * velX.get(i) + velY.get(i) * velY.get(i))));
+            velocityField.setTooltip(new Tooltip("Speed [px/s]"));
+            velocityField.setPrefWidth(72);
+            velocityField.setStyle("-fx-font-family: monospace; -fx-font-size: 11px; -fx-background-color: #1d1d28; -fx-text-fill: #ffffff; -fx-border-color: #444455;");
+            velocityField.setOnAction(_ -> applyVelocityField(i));
+            velocityField.focusedProperty().addListener((_, _, focused) -> {
+                if (!focused) {
+                    applyVelocityField(i);
+                }
+            });
+            velocityFields[i] = velocityField;
+            Label velocityPrefix = new Label("V:");
+            velocityPrefix.setStyle("-fx-text-fill: #ffffff; -fx-font-family: monospace; -fx-font-size: 11px;");
+
+            row.getChildren().addAll(label, massPrefix, massField, velocityPrefix, velocityField);
         } else {
             row.getChildren().add(label);
         }
@@ -599,6 +722,34 @@ public class GravityGPU extends Application {
         }
     }
 
+    private void applyVelocityField(int i) {
+        TextField velocityField = velocityFields[i];
+        if (velocityField == null) {
+            return;
+        }
+
+        try {
+            float newSpeed = Math.max(0.0f, Float.parseFloat(velocityField.getText().trim().replace(',', '.')));
+            float currentVx = velX.get(i);
+            float currentVy = velY.get(i);
+            float currentSpeed = (float) Math.sqrt(currentVx * currentVx + currentVy * currentVy);
+
+            if (currentSpeed > 0.000001f) {
+                float scale = newSpeed / currentSpeed;
+                velX.set(i, currentVx * scale);
+                velY.set(i, currentVy * scale);
+            } else {
+                velX.set(i, newSpeed);
+                velY.set(i, 0.0f);
+            }
+
+            velocityField.setText(String.format("%.2f", newSpeed));
+        } catch (NumberFormatException e) {
+            float currentSpeed = (float) Math.sqrt(velX.get(i) * velX.get(i) + velY.get(i) * velY.get(i));
+            velocityField.setText(String.format("%.2f", currentSpeed));
+        }
+    }
+
     private float radiusForCreatedMass(float bodyMass) {
         return Math.min(MAX_CREATED_BODY_RADIUS, (float) Math.max(3.0, 4.0 + Math.pow(bodyMass, 1.0 / 3.0) * 1.8));
     }
@@ -622,6 +773,7 @@ public class GravityGPU extends Application {
             dashboardRows[i] = null;
             dashboardLabels[i] = null;
             massFields[i] = null;
+            velocityFields[i] = null;
             trailX.get(i).clear();
             trailY.get(i).clear();
         }
