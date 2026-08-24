@@ -34,19 +34,43 @@ public class GravityGPU extends Application {
     private static final float SPEED_FACTOR = 0.1f;
     private static final float G = 1000.0f * (SPEED_FACTOR * SPEED_FACTOR);
     private static final float DT = 0.0012f;
-    private static final float SUN_MASS = 100000.0f;
-    private static final float EARTH_ORBIT_R = 140.0f;
+    private static final float SUN_MASS = 332946.0f;
+    private static final float PHYSICS_UNITS_PER_AU = 140.0f;
+    private static final float ASTRONOMICAL_UNIT_KM = 149_597_870.7f;
+    private static final float EARTH_ORBITAL_SPEED_KM_PER_SECOND = 29.78f;
     private static final float VELOCITY_SCALE = 0.085f;
     private static final float MAX_CREATED_BODY_RADIUS = 20.0f;
     private static final float CENTER_COLLISION_EPSILON = 0.5f;
-    private static final int GPU_SUB_STEPS = 8;
-    private static final float HABITABLE_ZONE_INNER_RADIUS = 115.0f;
-    private static final float HABITABLE_ZONE_OUTER_RADIUS = 165.0f;
+    private static final int GPU_SUB_STEPS = 12;
+    private static final float MIN_PLANET_ORBIT_RADIUS = 55.0f;
+    private static final float ORBIT_EDGE_PADDING = 50.0f;
+    private static final float MERCURY_AU = 0.387f;
+    private static final float VENUS_AU = 0.723f;
+    private static final float EARTH_AU = 1.000f;
+    private static final float MARS_AU = 1.524f;
+    private static final float JUPITER_AU = 5.203f;
+    private static final float SATURN_AU = 9.537f;
+    private static final float URANUS_AU = 19.191f;
+    private static final float NEPTUNE_AU = 30.070f;
+    private static final float MERCURY_ECCENTRICITY = 0.2056f;
+    private static final float VENUS_ECCENTRICITY = 0.0068f;
+    private static final float EARTH_ECCENTRICITY = 0.0167f;
+    private static final float MARS_ECCENTRICITY = 0.0934f;
+    private static final float JUPITER_ECCENTRICITY = 0.0489f;
+    private static final float SATURN_ECCENTRICITY = 0.0565f;
+    private static final float URANUS_ECCENTRICITY = 0.0472f;
+    private static final float NEPTUNE_ECCENTRICITY = 0.0086f;
+    private static final float HABITABLE_ZONE_INNER_AU = 0.95f;
+    private static final float HABITABLE_ZONE_OUTER_AU = 1.37f;
     private static final float HABITABLE_ZONE_MIN_SCALE = 0.35f;
     private static final float HABITABLE_ZONE_MAX_SCALE = 3.0f;
-    private static final float ASTEROID_BELT_INNER_RADIUS = 205.0f;
-    private static final float ASTEROID_BELT_OUTER_RADIUS = 232.0f;
+    private static final float ASTEROID_BELT_INNER_AU = 2.1f;
+    private static final float ASTEROID_BELT_OUTER_AU = 3.3f;
     private static final int ASTEROID_COUNT = 180;
+    private static final float[] STABLE_ORBIT_PHASES = {
+            0.10f, 1.65f, 3.15f, 4.85f,
+            0.75f, 2.85f, 4.95f, 5.65f
+    };
 
     private final FloatArray posX = new FloatArray(MAX_BODIES);
     private final FloatArray posY = new FloatArray(MAX_BODIES);
@@ -58,10 +82,16 @@ public class GravityGPU extends Application {
     private final FloatArray nextVelY = new FloatArray(MAX_BODIES);
     private final FloatArray accX = new FloatArray(MAX_BODIES);
     private final FloatArray accY = new FloatArray(MAX_BODIES);
+    private final FloatArray nextAccX = new FloatArray(MAX_BODIES);
+    private final FloatArray nextAccY = new FloatArray(MAX_BODIES);
     private final FloatArray mass = new FloatArray(MAX_BODIES);
     private final FloatArray radius = new FloatArray(MAX_BODIES);
+    private final FloatArray dashboardSpeed = new FloatArray(MAX_BODIES);
+    private final FloatArray dashboardAcceleration = new FloatArray(MAX_BODIES);
+    private final FloatArray dashboardNearestDistance = new FloatArray(MAX_BODIES);
     private final IntArray activeState = new IntArray(MAX_BODIES);
     private final IntArray collisionTarget = new IntArray(MAX_BODIES);
+    private final IntArray dashboardNearestIndex = new IntArray(MAX_BODIES);
 
     private final FloatArray physParams = new FloatArray(2);
     private final IntArray simulationState = new IntArray(1);
@@ -69,6 +99,8 @@ public class GravityGPU extends Application {
     private final String[] bodyNames = new String[MAX_BODIES];
     private final Color[] bodyColors = new Color[MAX_BODIES];
     private final boolean[] editableMass = new boolean[MAX_BODIES];
+    private final float[] orbitSemiMajorAu = new float[MAX_BODIES];
+    private final float[] orbitEccentricity = new float[MAX_BODIES];
     private final HBox[] dashboardRows = new HBox[MAX_BODIES];
     private final Label[] dashboardLabels = new Label[MAX_BODIES];
     private final TextField[] massFields = new TextField[MAX_BODIES];
@@ -90,6 +122,8 @@ public class GravityGPU extends Application {
     private int customBodyCount = 0;
     private boolean showHabitableZone = false;
     private boolean showAsteroidBelt = false;
+    private boolean alignPlanetsOnReset = false;
+    private boolean showOrbitGuides = false;
 
     private final VBox dashboardList = new VBox(6);
     private double canvasWidth = CANVAS_WIDTH;
@@ -125,12 +159,13 @@ public class GravityGPU extends Application {
             } else if (creationState == CreationState.SELECTING_VECTOR) {
                 float dx = (float) event.getX() - clickX;
                 float dy = (float) event.getY() - clickY;
+                float velocityScale = physicsUnitsPerScreenPixelAtEarthOrbit() * VELOCITY_SCALE;
 
                 customBodyCount++;
                 addBody(
                         String.format("Body #%d", customBodyCount),
-                        clickX, clickY,
-                        dx * VELOCITY_SCALE, dy * VELOCITY_SCALE,
+                        physicsXForScreen(clickX, clickY), physicsYForScreen(clickX, clickY),
+                        dx * velocityScale, dy * velocityScale,
                         createdMass, createdRadius, Color.RED, true
                 );
 
@@ -175,6 +210,24 @@ public class GravityGPU extends Application {
         btnReset.setFocusTraversable(false);
         btnReset.setOnAction(_ -> resetSystem());
 
+        CheckBox alignPlanetsCheckbox = new CheckBox("Align planets on reset");
+        alignPlanetsCheckbox.setSelected(false);
+        alignPlanetsCheckbox.setFocusTraversable(false);
+        alignPlanetsCheckbox.setStyle("-fx-text-fill: #b8b8c8; -fx-font-family: monospace; -fx-font-size: 11px;");
+        alignPlanetsCheckbox.selectedProperty().addListener((_, _, selected) -> alignPlanetsOnReset = selected);
+
+        CheckBox orbitGuidesCheckbox = new CheckBox("Show orbits");
+        orbitGuidesCheckbox.setSelected(false);
+        orbitGuidesCheckbox.setFocusTraversable(false);
+        orbitGuidesCheckbox.setStyle("-fx-text-fill: #9ecfff; -fx-font-family: monospace; -fx-font-size: 11px;");
+        orbitGuidesCheckbox.selectedProperty().addListener((_, _, selected) -> showOrbitGuides = selected);
+
+        GridPane optionsGrid = new GridPane();
+        optionsGrid.setHgap(12);
+        optionsGrid.setVgap(4);
+        optionsGrid.add(alignPlanetsCheckbox, 0, 0);
+        optionsGrid.add(orbitGuidesCheckbox, 1, 0);
+
         CheckBox habitableZoneCheckbox = new CheckBox("Show golden belt");
         habitableZoneCheckbox.setSelected(false);
         habitableZoneCheckbox.setFocusTraversable(false);
@@ -190,13 +243,13 @@ public class GravityGPU extends Application {
         Label legend = new Label("""
                 M = mass [M_Earth]
                 R = body radius [px]
-                V = speed [px/s]
-                A = acceleration [px/s²]
-                X/Y = position [px]
-                Nearest = closest body and distance [px]""");
+                V = speed [km/s eq]
+                A = acceleration [m/s² eq]
+                X/Y = physical position [AU]
+                Nearest = closest body and distance [AU]""");
         legend.setStyle("-fx-text-fill: #b8b8c8; -fx-font-family: monospace; -fx-font-size: 11px; -fx-padding: 0 0 6 0;");
 
-        sidebar.getChildren().addAll(title, btnReset, habitableZoneCheckbox, asteroidBeltCheckbox, legend, dashboardList);
+        sidebar.getChildren().addAll(title, btnReset, optionsGrid, habitableZoneCheckbox, asteroidBeltCheckbox, legend, dashboardList);
 
         BorderPane root = new BorderPane();
         root.setCenter(canvas);
@@ -231,8 +284,8 @@ public class GravityGPU extends Application {
                 frameCounter++;
                 if (frameCounter % 2 == 0) {
                     for (int i = 0; i < bodyCount; i++) {
-                        trailX.get(i).add(posX.get(i));
-                        trailY.get(i).add(posY.get(i));
+                        trailX.get(i).add(screenXForPhysics(posX.get(i), posY.get(i)));
+                        trailY.get(i).add(screenYForPhysics(posX.get(i), posY.get(i)));
                         if (trailX.get(i).size() > 180) {
                             trailX.get(i).removeFirst();
                             trailY.get(i).removeFirst();
@@ -247,12 +300,15 @@ public class GravityGPU extends Application {
                 gc.setFill(Color.rgb(3, 3, 10, 0.35));
                 gc.fillRect(0, 0, canvasWidth, canvasHeight);
                 drawSolarBelts(gc, frameCounter);
+                drawOrbitGuides(gc);
 
                 gc.setTextAlign(TextAlignment.CENTER);
                 gc.setTextBaseline(VPos.BOTTOM);
                 gc.setFont(Font.font("SansSerif", 11));
 
                 for (int i = 0; i < bodyCount; i++) {
+                    float screenX = screenXForPhysics(posX.get(i), posY.get(i));
+                    float screenY = screenYForPhysics(posX.get(i), posY.get(i));
                     gc.setStroke(bodyColors[i].deriveColor(0, 1, 1, 0.3));
                     gc.setLineWidth(1.0);
                     List<Float> tx = trailX.get(i);
@@ -264,10 +320,10 @@ public class GravityGPU extends Application {
                     drawPlanetRings(gc, i);
 
                     gc.setFill(bodyColors[i]);
-                    gc.fillOval(posX.get(i) - radius.get(i), posY.get(i) - radius.get(i), radius.get(i) * 2, radius.get(i) * 2);
+                    gc.fillOval(screenX - radius.get(i), screenY - radius.get(i), radius.get(i) * 2, radius.get(i) * 2);
 
                     gc.setFill(bodyColors[i].deriveColor(0, 0.7, 1.2, 0.9));
-                    gc.fillText(bodyNames[i], posX.get(i), posY.get(i) - radius.get(i) - 4);
+                    gc.fillText(bodyNames[i], screenX, screenY - radius.get(i) - 4);
                 }
 
                 if (creationState == CreationState.SIZING_MASS) {
@@ -289,6 +345,7 @@ public class GravityGPU extends Application {
                     float dx = vectorEndX - clickX;
                     float dy = vectorEndY - clickY;
                     float vectorLength = (float) Math.sqrt(dx * dx + dy * dy);
+                    float previewSpeed = speedToKilometersPerSecond(vectorLength * physicsUnitsPerScreenPixelAtEarthOrbit() * VELOCITY_SCALE);
 
                     gc.setStroke(Color.RED);
                     gc.setLineWidth(2.0);
@@ -297,11 +354,67 @@ public class GravityGPU extends Application {
                     gc.setTextAlign(TextAlignment.LEFT);
                     gc.setTextBaseline(VPos.CENTER);
                     gc.setFill(Color.WHITE);
-                    gc.fillText(String.format("Masa: %.1f M_Earth | V: %.2f px/s", createdMass, vectorLength * VELOCITY_SCALE), vectorEndX + 10, vectorEndY);
+                    gc.fillText(String.format("Masa: %.1f M_Earth | V: %.2f km/s", createdMass, previewSpeed), vectorEndX + 10, vectorEndY);
                 }
             }
         };
         timer.start();
+    }
+
+    private void drawOrbitGuides(GraphicsContext gc) {
+        if (!showOrbitGuides) {
+            return;
+        }
+
+        int sunIndex = findSunIndex();
+        if (sunIndex < 0) {
+            return;
+        }
+
+        gc.setLineWidth(0.9);
+        gc.setLineDashes(8.0, 7.0);
+
+        for (int i = 0; i < bodyCount; i++) {
+            if (i == sunIndex || editableMass[i] || bodyNames[i] == null) {
+                continue;
+            }
+
+            if (orbitSemiMajorAu[i] <= 0.0f) {
+                continue;
+            }
+
+            Color orbitColor = bodyColors[i] == null ? Color.WHITE : bodyColors[i];
+            gc.setStroke(orbitColor.deriveColor(0, 0.8, 1.3, 0.28));
+            drawEllipticalOrbitGuide(gc, sunIndex, i);
+        }
+
+        gc.setLineDashes();
+    }
+
+    private void drawEllipticalOrbitGuide(GraphicsContext gc, int sunIndex, int bodyIndex) {
+        final int segments = 144;
+        float semiMajorAxis = physicalRadiusForAu(orbitSemiMajorAu[bodyIndex]);
+        float eccentricity = orbitEccentricity[bodyIndex];
+        float semiLatusRectum = semiMajorAxis * (1.0f - eccentricity * eccentricity);
+        float sunPhysicsX = posX.get(sunIndex);
+        float sunPhysicsY = posY.get(sunIndex);
+
+        double previousX = 0.0;
+        double previousY = 0.0;
+        for (int segment = 0; segment <= segments; segment++) {
+            double trueAnomaly = Math.PI * 2.0 * segment / segments;
+            double radiusFromFocus = semiLatusRectum / (1.0 + eccentricity * Math.cos(trueAnomaly));
+            float physicsX = (float) (sunPhysicsX + radiusFromFocus * Math.cos(trueAnomaly));
+            float physicsY = (float) (sunPhysicsY + radiusFromFocus * Math.sin(trueAnomaly));
+            double screenX = screenXForPhysics(physicsX, physicsY);
+            double screenY = screenYForPhysics(physicsX, physicsY);
+
+            if (segment > 0) {
+                gc.strokeLine(previousX, previousY, screenX, screenY);
+            }
+            previousX = screenX;
+            previousY = screenY;
+        }
     }
 
     private void drawSolarBelts(GraphicsContext gc, int frameCounter) {
@@ -314,8 +427,8 @@ public class GravityGPU extends Application {
             return;
         }
 
-        float sunX = posX.get(sunIndex);
-        float sunY = posY.get(sunIndex);
+        float sunX = screenXForPhysics(posX.get(sunIndex), posY.get(sunIndex));
+        float sunY = screenYForPhysics(posX.get(sunIndex), posY.get(sunIndex));
         float sunMass = mass.get(sunIndex);
         if (showHabitableZone) {
             drawHabitableZone(gc, sunX, sunY, sunMass);
@@ -338,22 +451,22 @@ public class GravityGPU extends Application {
 
     private void drawHabitableZone(GraphicsContext gc, float sunX, float sunY, float sunMass) {
         double luminosityScale = habitableZoneScale(sunMass);
-        double innerRadius = HABITABLE_ZONE_INNER_RADIUS * luminosityScale;
-        double outerRadius = HABITABLE_ZONE_OUTER_RADIUS * luminosityScale;
+        double innerRadius = screenRadiusForPhysicsDistance(physicalRadiusForAu((float) (HABITABLE_ZONE_INNER_AU * luminosityScale)));
+        double outerRadius = screenRadiusForPhysicsDistance(physicalRadiusForAu((float) (HABITABLE_ZONE_OUTER_AU * luminosityScale)));
         double zoneRadius = (innerRadius + outerRadius) / 2.0;
         double zoneWidth = outerRadius - innerRadius;
         double diameter = zoneRadius * 2.0;
 
-        gc.setStroke(Color.rgb(255, 190, 55, 0.08));
-        gc.setLineWidth(zoneWidth);
+        gc.setStroke(Color.rgb(255, 190, 55, 0.025));
+        gc.setLineWidth(zoneWidth * 0.65);
         gc.strokeOval(sunX - zoneRadius, sunY - zoneRadius, diameter, diameter);
 
-        gc.setStroke(Color.rgb(255, 215, 90, 0.18));
-        gc.setLineWidth(zoneWidth * 0.45);
+        gc.setStroke(Color.rgb(255, 215, 90, 0.07));
+        gc.setLineWidth(zoneWidth * 0.25);
         gc.strokeOval(sunX - zoneRadius, sunY - zoneRadius, diameter, diameter);
 
-        gc.setStroke(Color.rgb(255, 235, 160, 0.28));
-        gc.setLineWidth(1.2);
+        gc.setStroke(Color.rgb(255, 235, 160, 0.16));
+        gc.setLineWidth(0.8);
         gc.strokeOval(sunX - innerRadius, sunY - innerRadius, innerRadius * 2.0, innerRadius * 2.0);
         gc.strokeOval(sunX - outerRadius, sunY - outerRadius, outerRadius * 2.0, outerRadius * 2.0);
     }
@@ -365,15 +478,114 @@ public class GravityGPU extends Application {
         return Math.max(HABITABLE_ZONE_MIN_SCALE, Math.min(HABITABLE_ZONE_MAX_SCALE, radiusScale));
     }
 
+    private float screenXForPhysics(float physicsX, float physicsY) {
+        float physicsDistance = (float) Math.sqrt(physicsX * physicsX + physicsY * physicsY);
+        if (physicsDistance <= 0.000001f) {
+            return (float) (canvasWidth / 2.0);
+        }
+
+        float screenDistance = screenRadiusForPhysicsDistance(physicsDistance);
+        return (float) (canvasWidth / 2.0 + (physicsX / physicsDistance) * screenDistance);
+    }
+
+    private float screenYForPhysics(float physicsX, float physicsY) {
+        float physicsDistance = (float) Math.sqrt(physicsX * physicsX + physicsY * physicsY);
+        if (physicsDistance <= 0.000001f) {
+            return (float) (canvasHeight / 2.0);
+        }
+
+        float screenDistance = screenRadiusForPhysicsDistance(physicsDistance);
+        return (float) (canvasHeight / 2.0 + (physicsY / physicsDistance) * screenDistance);
+    }
+
+    private float physicsXForScreen(float screenX, float screenY) {
+        float dx = (float) (screenX - canvasWidth / 2.0);
+        float dy = (float) (screenY - canvasHeight / 2.0);
+        float screenDistance = (float) Math.sqrt(dx * dx + dy * dy);
+        if (screenDistance <= 0.000001f) {
+            return 0.0f;
+        }
+
+        float physicsDistance = physicsRadiusForScreenDistance(screenDistance);
+        return dx / screenDistance * physicsDistance;
+    }
+
+    private float physicsYForScreen(float screenX, float screenY) {
+        float dx = (float) (screenX - canvasWidth / 2.0);
+        float dy = (float) (screenY - canvasHeight / 2.0);
+        float screenDistance = (float) Math.sqrt(dx * dx + dy * dy);
+        if (screenDistance <= 0.000001f) {
+            return 0.0f;
+        }
+
+        float physicsDistance = physicsRadiusForScreenDistance(screenDistance);
+        return dy / screenDistance * physicsDistance;
+    }
+
+    private float screenRadiusForPhysicsDistance(float physicsDistance) {
+        float au = physicsDistanceToAu(physicsDistance);
+        if (au <= MERCURY_AU) {
+            return MIN_PLANET_ORBIT_RADIUS * au / MERCURY_AU;
+        }
+
+        return orbitRadiusForAu(au);
+    }
+
+    private float physicsRadiusForScreenDistance(float screenDistance) {
+        if (screenDistance <= MIN_PLANET_ORBIT_RADIUS) {
+            return physicalRadiusForAu(MERCURY_AU) * screenDistance / MIN_PLANET_ORBIT_RADIUS;
+        }
+
+        double maxOrbitRadius = Math.max(MIN_PLANET_ORBIT_RADIUS + 1.0, Math.min(canvasWidth, canvasHeight) / 2.0 - ORBIT_EDGE_PADDING);
+        double normalized = (screenDistance - MIN_PLANET_ORBIT_RADIUS) / (maxOrbitRadius - MIN_PLANET_ORBIT_RADIUS);
+        normalized = Math.max(0.0, Math.min(1.0, normalized));
+        double minLog = Math.log(MERCURY_AU);
+        double maxLog = Math.log(NEPTUNE_AU);
+        return physicalRadiusForAu((float) Math.exp(minLog + normalized * (maxLog - minLog)));
+    }
+
+    private float physicsUnitsPerScreenPixelAtEarthOrbit() {
+        return physicalRadiusForAu(EARTH_AU) / orbitRadiusForAu(EARTH_AU);
+    }
+
+    private float physicsDistanceToAu(float physicsDistance) {
+        return physicsDistance / PHYSICS_UNITS_PER_AU;
+    }
+
+    private float speedToKilometersPerSecond(float simulationSpeed) {
+        float earthSimulationSpeed = (float) Math.sqrt(G * (SUN_MASS + 1.0f) / physicalRadiusForAu(EARTH_AU));
+        return simulationSpeed / earthSimulationSpeed * EARTH_ORBITAL_SPEED_KM_PER_SECOND;
+    }
+
+    private float kilometersPerSecondToSimulationSpeed(float kilometersPerSecond) {
+        float earthSimulationSpeed = (float) Math.sqrt(G * (SUN_MASS + 1.0f) / physicalRadiusForAu(EARTH_AU));
+        return kilometersPerSecond / EARTH_ORBITAL_SPEED_KM_PER_SECOND * earthSimulationSpeed;
+    }
+
+    private float accelerationToMetersPerSecondSquared(float simulationAcceleration) {
+        float realSecondsPerSimulationSecond = realSecondsPerSimulationSecond();
+        float kilometersPerSimulationUnit = ASTRONOMICAL_UNIT_KM / PHYSICS_UNITS_PER_AU;
+        float kilometersPerSecondSquared = simulationAcceleration * kilometersPerSimulationUnit
+                / (realSecondsPerSimulationSecond * realSecondsPerSimulationSecond);
+        return kilometersPerSecondSquared * 1000.0f;
+    }
+
+    private float realSecondsPerSimulationSecond() {
+        float earthSimulationSpeed = (float) Math.sqrt(G * (SUN_MASS + 1.0f) / physicalRadiusForAu(EARTH_AU));
+        return earthSimulationSpeed * (ASTRONOMICAL_UNIT_KM / PHYSICS_UNITS_PER_AU) / EARTH_ORBITAL_SPEED_KM_PER_SECOND;
+    }
+
     private void drawAsteroidBelt(GraphicsContext gc, float sunX, float sunY, int frameCounter) {
         double rotation = frameCounter * 0.0008;
-        double beltWidth = ASTEROID_BELT_OUTER_RADIUS - ASTEROID_BELT_INNER_RADIUS;
+        double beltInnerRadius = orbitRadiusForAu(ASTEROID_BELT_INNER_AU);
+        double beltOuterRadius = orbitRadiusForAu(ASTEROID_BELT_OUTER_AU);
+        double beltWidth = beltOuterRadius - beltInnerRadius;
 
         for (int i = 0; i < ASTEROID_COUNT; i++) {
             double angle = i * 2.399963229728653 + rotation;
             double radialNoise = ((i * 37) % 100) / 100.0;
             double orbitNoise = Math.sin(i * 12.9898) * 0.5 + 0.5;
-            double asteroidRadius = ASTEROID_BELT_INNER_RADIUS + beltWidth * radialNoise + orbitNoise * 2.5;
+            double asteroidRadius = beltInnerRadius + beltWidth * radialNoise + orbitNoise * 2.5;
             double x = sunX + Math.cos(angle) * asteroidRadius;
             double y = sunY + Math.sin(angle) * asteroidRadius;
             double size = 0.8 + ((i * 17) % 9) * 0.12;
@@ -390,9 +602,11 @@ public class GravityGPU extends Application {
         }
 
         if (name.startsWith("Saturn")) {
-            drawSaturnRings(gc, posX.get(bodyIndex), posY.get(bodyIndex), radius.get(bodyIndex));
+            drawSaturnRings(gc, screenXForPhysics(posX.get(bodyIndex), posY.get(bodyIndex)),
+                    screenYForPhysics(posX.get(bodyIndex), posY.get(bodyIndex)), radius.get(bodyIndex));
         } else if (name.startsWith("Uranus")) {
-            drawUranusVerticalRing(gc, posX.get(bodyIndex), posY.get(bodyIndex), radius.get(bodyIndex));
+            drawUranusVerticalRing(gc, screenXForPhysics(posX.get(bodyIndex), posY.get(bodyIndex)),
+                    screenYForPhysics(posX.get(bodyIndex), posY.get(bodyIndex)), radius.get(bodyIndex));
         }
     }
 
@@ -430,10 +644,16 @@ public class GravityGPU extends Application {
     }
 
     private void initTornadoPlanOnce() {
+        if (GPU_SUB_STEPS % 2 != 0) {
+            throw new IllegalStateException("GPU_SUB_STEPS must be even so final Verlet buffers are posX/posY/velX/velY.");
+        }
+
         TaskGraph taskGraph = new TaskGraph("nbody")
                 .transferToDevice(DataTransferMode.EVERY_EXECUTION, posX, posY, velX, velY, mass, activeState, physParams, simulationState)
-                .transferToDevice(DataTransferMode.FIRST_EXECUTION, nextPosX, nextPosY, nextVelX, nextVelY)
-                .task("clearCollisionTargets", PhysicsKernels::clearCollisionTargets, collisionTarget, simulationState);
+                .transferToDevice(DataTransferMode.FIRST_EXECUTION, nextPosX, nextPosY, nextVelX, nextVelY, accX, accY, nextAccX, nextAccY)
+                .task("clearCollisionTargets", PhysicsKernels::clearCollisionTargets, collisionTarget, simulationState)
+                .task("computeInitialAccelerations", PhysicsKernels::computeAccelerations,
+                        posX, posY, accX, accY, mass, activeState, physParams, simulationState);
 
         for (int step = 0; step < GPU_SUB_STEPS; step++) {
             boolean evenStep = step % 2 == 0;
@@ -441,21 +661,37 @@ public class GravityGPU extends Application {
             FloatArray sourcePosY = evenStep ? posY : nextPosY;
             FloatArray sourceVelX = evenStep ? velX : nextVelX;
             FloatArray sourceVelY = evenStep ? velY : nextVelY;
+            FloatArray sourceAccX = evenStep ? accX : nextAccX;
+            FloatArray sourceAccY = evenStep ? accY : nextAccY;
             FloatArray targetPosX = evenStep ? nextPosX : posX;
             FloatArray targetPosY = evenStep ? nextPosY : posY;
             FloatArray targetVelX = evenStep ? nextVelX : velX;
             FloatArray targetVelY = evenStep ? nextVelY : velY;
+            FloatArray targetAccX = evenStep ? nextAccX : accX;
+            FloatArray targetAccY = evenStep ? nextAccY : accY;
 
             taskGraph
-                    .task("integrateStep" + step, PhysicsKernels::integrateStep,
-                            sourcePosX, sourcePosY, sourceVelX, sourceVelY,
-                            targetPosX, targetPosY, targetVelX, targetVelY,
-                            accX, accY, mass, activeState, physParams, simulationState)
+                    .task("integrateVerletPosition" + step, PhysicsKernels::integrateVerletPosition,
+                            sourcePosX, sourcePosY, sourceVelX, sourceVelY, sourceAccX, sourceAccY,
+                            targetPosX, targetPosY, activeState, physParams, simulationState)
+                    .task("computeTargetAccelerations" + step, PhysicsKernels::computeAccelerations,
+                            targetPosX, targetPosY, targetAccX, targetAccY,
+                            mass, activeState, physParams, simulationState)
+                    .task("integrateVerletVelocity" + step, PhysicsKernels::integrateVerletVelocity,
+                            sourceVelX, sourceVelY, sourceAccX, sourceAccY,
+                            targetVelX, targetVelY, targetAccX, targetAccY,
+                            activeState, physParams, simulationState)
                     .task("detectCollisions" + step, PhysicsKernels::detectCollisions,
                             targetPosX, targetPosY, activeState, collisionTarget, CENTER_COLLISION_EPSILON, simulationState);
         }
 
-        taskGraph.transferToHost(DataTransferMode.EVERY_EXECUTION, posX, posY, velX, velY, collisionTarget);
+        taskGraph
+                .task("computeDashboardMetrics", PhysicsKernels::computeDashboardMetrics,
+                        posX, posY, velX, velY, accX, accY, activeState,
+                        dashboardSpeed, dashboardAcceleration, dashboardNearestIndex, dashboardNearestDistance, simulationState)
+                .transferToHost(DataTransferMode.EVERY_EXECUTION,
+                        posX, posY, velX, velY, collisionTarget,
+                        dashboardSpeed, dashboardAcceleration, dashboardNearestIndex, dashboardNearestDistance);
 
         executionPlan = new TornadoExecutionPlan(taskGraph.snapshot());
     }
@@ -503,8 +739,14 @@ public class GravityGPU extends Application {
         velY.set(survivor, mergedVy);
         accX.set(survivor, 0.0f);
         accY.set(survivor, 0.0f);
+        nextAccX.set(survivor, 0.0f);
+        nextAccY.set(survivor, 0.0f);
         mass.set(survivor, mergedMass);
         radius.set(survivor, radiusForCreatedMass(mergedMass));
+        dashboardSpeed.set(survivor, (float) Math.sqrt(mergedVx * mergedVx + mergedVy * mergedVy));
+        dashboardAcceleration.set(survivor, 0.0f);
+        dashboardNearestDistance.set(survivor, 0.0f);
+        dashboardNearestIndex.set(survivor, -1);
         bodyNames[survivor] = bodyNames[survivor] + "+";
         editableMass[survivor] = editableMass[survivor] || editableMass[absorbed];
         activeState.set(absorbed, 0);
@@ -539,10 +781,18 @@ public class GravityGPU extends Application {
         velY.set(target, velY.get(source));
         accX.set(target, accX.get(source));
         accY.set(target, accY.get(source));
+        nextAccX.set(target, nextAccX.get(source));
+        nextAccY.set(target, nextAccY.get(source));
         mass.set(target, mass.get(source));
         radius.set(target, radius.get(source));
+        dashboardSpeed.set(target, dashboardSpeed.get(source));
+        dashboardAcceleration.set(target, dashboardAcceleration.get(source));
+        dashboardNearestDistance.set(target, dashboardNearestDistance.get(source));
+        dashboardNearestIndex.set(target, dashboardNearestIndex.get(source));
         bodyColors[target] = bodyColors[source];
         editableMass[target] = editableMass[source];
+        orbitSemiMajorAu[target] = orbitSemiMajorAu[source];
+        orbitEccentricity[target] = orbitEccentricity[source];
         activeState.set(target, 1);
         collisionTarget.set(target, -1);
 
@@ -564,10 +814,18 @@ public class GravityGPU extends Application {
         velY.set(i, 0.0f);
         accX.set(i, 0.0f);
         accY.set(i, 0.0f);
+        nextAccX.set(i, 0.0f);
+        nextAccY.set(i, 0.0f);
         mass.set(i, 0.0f);
         radius.set(i, 0.0f);
+        dashboardSpeed.set(i, 0.0f);
+        dashboardAcceleration.set(i, 0.0f);
+        dashboardNearestDistance.set(i, 0.0f);
+        dashboardNearestIndex.set(i, -1);
         bodyColors[i] = null;
         editableMass[i] = false;
+        orbitSemiMajorAu[i] = 0.0f;
+        orbitEccentricity[i] = 0.0f;
         activeState.set(i, 0);
         collisionTarget.set(i, -1);
         trailX.get(i).clear();
@@ -584,16 +842,20 @@ public class GravityGPU extends Application {
         }
 
         for (int i = 0; i < bodyCount; i++) {
-            float speed = (float) Math.sqrt(velX.get(i) * velX.get(i) + velY.get(i) * velY.get(i));
-            float acceleration = (float) Math.sqrt(accX.get(i) * accX.get(i) + accY.get(i) * accY.get(i));
-            int nearestIndex = findNearestBodyIndex(i);
+            float simulationSpeed = dashboardSpeed.get(i);
+            float acceleration = dashboardAcceleration.get(i);
+            int nearestIndex = dashboardNearestIndex.get(i);
             String nearestText = nearestIndex < 0
                     ? "Nearest: -"
-                    : String.format("Nearest: %s %.1fpx", bodyNames[nearestIndex], distanceBetween(i, nearestIndex));
+                    : String.format("Nearest: %s %.3fAU", bodyNames[nearestIndex], physicsDistanceToAu(dashboardNearestDistance.get(i)));
             HBox row = dashboardRows[i];
             Label label = dashboardLabels[i];
+            float speed = speedToKilometersPerSecond(simulationSpeed);
+            float accelerationMetersPerSecondSquared = accelerationToMetersPerSecondSquared(acceleration);
+            float xAu = posX.get(i) / PHYSICS_UNITS_PER_AU;
+            float yAu = posY.get(i) / PHYSICS_UNITS_PER_AU;
 
-            if (row == null) {
+            if (dashboardRowNeedsRebuild(i)) {
                 row = createDashboardRow(i);
                 dashboardRows[i] = row;
                 label = dashboardLabels[i];
@@ -601,9 +863,9 @@ public class GravityGPU extends Application {
 
             if (editableMass[i]) {
                 label.setText(String.format(
-                        "%-10s | R:%4.1f%nA:%7.3f | X:%6.1f Y:%6.1f%n%s",
+                        "%-10s | R:%4.1f%nA:%7.4f | X:%7.3f Y:%7.3f%n%s",
                         bodyNames[i], radius.get(i),
-                        acceleration, posX.get(i), posY.get(i),
+                        accelerationMetersPerSecondSquared, xAu, yAu,
                         nearestText
                 ));
                 TextField massField = massFields[i];
@@ -616,9 +878,9 @@ public class GravityGPU extends Application {
                 }
             } else {
                 label.setText(String.format(
-                        "%-10s | M:%8.2f | R:%4.1f%nV:%7.2f | A:%7.3f | X:%6.1f Y:%6.1f%n%s",
+                        "%-10s | M:%8.2f | R:%4.1f%nV:%7.2f | A:%7.4f | X:%7.3f Y:%7.3f%n%s",
                         bodyNames[i], mass.get(i), radius.get(i),
-                        speed, acceleration, posX.get(i), posY.get(i),
+                        speed, accelerationMetersPerSecondSquared, xAu, yAu,
                         nearestText
                 ));
             }
@@ -629,6 +891,13 @@ public class GravityGPU extends Application {
                 dashboardList.getChildren().set(i, row);
             }
         }
+    }
+
+    private boolean dashboardRowNeedsRebuild(int i) {
+        return dashboardRows[i] == null
+                || dashboardLabels[i] == null
+                || (editableMass[i] && (massFields[i] == null || velocityFields[i] == null))
+                || (!editableMass[i] && (massFields[i] != null || velocityFields[i] != null));
     }
 
     private HBox createDashboardRow(int i) {
@@ -655,8 +924,8 @@ public class GravityGPU extends Application {
             Label massPrefix = new Label("M:");
             massPrefix.setStyle("-fx-text-fill: #ffffff; -fx-font-family: monospace; -fx-font-size: 11px;");
 
-            TextField velocityField = new TextField(String.format("%.2f", Math.sqrt(velX.get(i) * velX.get(i) + velY.get(i) * velY.get(i))));
-            velocityField.setTooltip(new Tooltip("Speed [px/s]"));
+            TextField velocityField = new TextField(String.format("%.2f", speedToKilometersPerSecond((float) Math.sqrt(velX.get(i) * velX.get(i) + velY.get(i) * velY.get(i)))));
+            velocityField.setTooltip(new Tooltip("Speed [km/s equivalent]"));
             velocityField.setPrefWidth(72);
             velocityField.setStyle("-fx-font-family: monospace; -fx-font-size: 11px; -fx-background-color: #1d1d28; -fx-text-fill: #ffffff; -fx-border-color: #444455;");
             velocityField.setOnAction(_ -> applyVelocityField(i));
@@ -671,39 +940,12 @@ public class GravityGPU extends Application {
 
             row.getChildren().addAll(label, massPrefix, massField, velocityPrefix, velocityField);
         } else {
+            massFields[i] = null;
+            velocityFields[i] = null;
             row.getChildren().add(label);
         }
 
         return row;
-    }
-
-    private int findNearestBodyIndex(int bodyIndex) {
-        int nearestIndex = -1;
-        float nearestDistanceSq = Float.MAX_VALUE;
-        float bodyX = posX.get(bodyIndex);
-        float bodyY = posY.get(bodyIndex);
-
-        for (int otherIndex = 0; otherIndex < bodyCount; otherIndex++) {
-            if (otherIndex == bodyIndex) {
-                continue;
-            }
-
-            float dx = posX.get(otherIndex) - bodyX;
-            float dy = posY.get(otherIndex) - bodyY;
-            float distanceSq = dx * dx + dy * dy;
-            if (distanceSq < nearestDistanceSq) {
-                nearestDistanceSq = distanceSq;
-                nearestIndex = otherIndex;
-            }
-        }
-
-        return nearestIndex;
-    }
-
-    private float distanceBetween(int firstIndex, int secondIndex) {
-        float dx = posX.get(secondIndex) - posX.get(firstIndex);
-        float dy = posY.get(secondIndex) - posY.get(firstIndex);
-        return (float) Math.sqrt(dx * dx + dy * dy);
     }
 
     private void applyMassField(int i) {
@@ -730,23 +972,24 @@ public class GravityGPU extends Application {
 
         try {
             float newSpeed = Math.max(0.0f, Float.parseFloat(velocityField.getText().trim().replace(',', '.')));
+            float newSimulationSpeed = kilometersPerSecondToSimulationSpeed(newSpeed);
             float currentVx = velX.get(i);
             float currentVy = velY.get(i);
             float currentSpeed = (float) Math.sqrt(currentVx * currentVx + currentVy * currentVy);
 
             if (currentSpeed > 0.000001f) {
-                float scale = newSpeed / currentSpeed;
+                float scale = newSimulationSpeed / currentSpeed;
                 velX.set(i, currentVx * scale);
                 velY.set(i, currentVy * scale);
             } else {
-                velX.set(i, newSpeed);
+                velX.set(i, newSimulationSpeed);
                 velY.set(i, 0.0f);
             }
 
             velocityField.setText(String.format("%.2f", newSpeed));
         } catch (NumberFormatException e) {
             float currentSpeed = (float) Math.sqrt(velX.get(i) * velX.get(i) + velY.get(i) * velY.get(i));
-            velocityField.setText(String.format("%.2f", currentSpeed));
+            velocityField.setText(String.format("%.2f", speedToKilometersPerSecond(currentSpeed)));
         }
     }
 
@@ -769,7 +1012,17 @@ public class GravityGPU extends Application {
         for (int i = 0; i < MAX_BODIES; i++) {
             activeState.set(i, 0);
             collisionTarget.set(i, -1);
+            dashboardSpeed.set(i, 0.0f);
+            dashboardAcceleration.set(i, 0.0f);
+            dashboardNearestDistance.set(i, 0.0f);
+            dashboardNearestIndex.set(i, -1);
+            accX.set(i, 0.0f);
+            accY.set(i, 0.0f);
+            nextAccX.set(i, 0.0f);
+            nextAccY.set(i, 0.0f);
             editableMass[i] = false;
+            orbitSemiMajorAu[i] = 0.0f;
+            orbitEccentricity[i] = 0.0f;
             dashboardRows[i] = null;
             dashboardLabels[i] = null;
             massFields[i] = null;
@@ -778,21 +1031,23 @@ public class GravityGPU extends Application {
             trailY.get(i).clear();
         }
 
-        float cx = (float) (canvasWidth / 2.0);
-        float cy = (float) (canvasHeight / 2.0);
+        float cx = 0.0f;
+        float cy = 0.0f;
 
         // Sun
         addBody("Sun", cx, cy, 0, 0, SUN_MASS, 16, Color.GOLD, false);
 
-        // Planets
-        addKeplerPlanet("Mercury", cx, cy, 55.0f,  0.055f, 3.0f, Color.GRAY);
-        addKeplerPlanet("Venus",   cx, cy, 95.0f,  0.815f, 4.5f, Color.BEIGE);
-        addKeplerPlanet("Earth",   cx, cy, EARTH_ORBIT_R, 1.000f, 5.0f, Color.DODGERBLUE);
-        addKeplerPlanet("Mars",    cx, cy, 185.0f, 0.107f, 4.0f, Color.INDIANRED);
-        addKeplerPlanet("Jupiter", cx, cy, 245.0f, 317.8f, 11.0f, Color.PERU);
-        addKeplerPlanet("Saturn",  cx, cy, 305.0f, 95.2f,  9.0f, Color.BURLYWOOD);
-        addKeplerPlanet("Uranus",  cx, cy, 365.0f, 14.5f,  7.0f, Color.LIGHTBLUE);
-        addKeplerPlanet("Neptune", cx, cy, 420.0f, 17.1f,  7.0f, Color.ROYALBLUE);
+        float[] orbitAngles = resetOrbitAngles();
+
+        // Planets use real mass ratios in Earth masses, real eccentricities, and AU-scaled orbital mechanics.
+        addKeplerPlanet("Mercury", cx, cy, MERCURY_AU, MERCURY_ECCENTRICITY, 0.055f, 3.0f, Color.GRAY, orbitAngles[0]);
+        addKeplerPlanet("Venus",   cx, cy, VENUS_AU,   VENUS_ECCENTRICITY,   0.815f, 4.5f, Color.BEIGE, orbitAngles[1]);
+        addKeplerPlanet("Earth",   cx, cy, EARTH_AU,   EARTH_ECCENTRICITY,   1.000f, 5.0f, Color.DODGERBLUE, orbitAngles[2]);
+        addKeplerPlanet("Mars",    cx, cy, MARS_AU,    MARS_ECCENTRICITY,    0.107f, 4.0f, Color.INDIANRED, orbitAngles[3]);
+        addKeplerPlanet("Jupiter", cx, cy, JUPITER_AU, JUPITER_ECCENTRICITY, 317.8f, 11.0f, Color.PERU, orbitAngles[4]);
+        addKeplerPlanet("Saturn",  cx, cy, SATURN_AU,  SATURN_ECCENTRICITY,  95.2f,  9.0f, Color.BURLYWOOD, orbitAngles[5]);
+        addKeplerPlanet("Uranus",  cx, cy, URANUS_AU,  URANUS_ECCENTRICITY,  14.5f,  7.0f, Color.LIGHTBLUE, orbitAngles[6]);
+        addKeplerPlanet("Neptune", cx, cy, NEPTUNE_AU, NEPTUNE_ECCENTRICITY, 17.1f,  7.0f, Color.ROYALBLUE, orbitAngles[7]);
 
         // Momentum compensation for the Sun.
         float totalPx = 0, totalPy = 0;
@@ -804,9 +1059,53 @@ public class GravityGPU extends Application {
         velY.set(0, -totalPy / mass.get(0));
     }
 
-    private void addKeplerPlanet(String name, float cx, float cy, float orbitR, float m, float size, Color color) {
-        float v = (float) Math.sqrt(G * (SUN_MASS + m) / orbitR);
-        addBody(name, cx + orbitR, cy, 0, v, m, size, color, false);
+    private float[] resetOrbitAngles() {
+        float[] angles = new float[8];
+        if (alignPlanetsOnReset) {
+            return angles;
+        }
+
+        double baseAngle = Math.random() * Math.PI * 2.0;
+        double jitterRange = Math.PI / 45.0;
+        for (int i = 0; i < angles.length; i++) {
+            double jitter = (Math.random() * 2.0 - 1.0) * jitterRange;
+            angles[i] = (float) (baseAngle + STABLE_ORBIT_PHASES[i] + jitter);
+        }
+
+        return angles;
+    }
+
+    private float orbitRadiusForAu(float semiMajorAxisAu) {
+        double minLog = Math.log(MERCURY_AU);
+        double maxLog = Math.log(NEPTUNE_AU);
+        double orbitLog = Math.log(Math.max(MERCURY_AU, semiMajorAxisAu));
+        double normalized = (orbitLog - minLog) / (maxLog - minLog);
+        double maxOrbitRadius = Math.max(MIN_PLANET_ORBIT_RADIUS + 1.0, Math.min(canvasWidth, canvasHeight) / 2.0 - ORBIT_EDGE_PADDING);
+        return (float) (MIN_PLANET_ORBIT_RADIUS + normalized * (maxOrbitRadius - MIN_PLANET_ORBIT_RADIUS));
+    }
+
+    private float physicalRadiusForAu(float semiMajorAxisAu) {
+        return semiMajorAxisAu * PHYSICS_UNITS_PER_AU;
+    }
+
+    private void addKeplerPlanet(String name, float cx, float cy, float semiMajorAxisAu, float eccentricity, float m, float size, Color color, float trueAnomaly) {
+        float semiMajorAxis = physicalRadiusForAu(semiMajorAxisAu);
+        float boundedEccentricity = Math.max(0.0f, Math.min(0.95f, eccentricity));
+        float semiLatusRectum = semiMajorAxis * (1.0f - boundedEccentricity * boundedEccentricity);
+        float radiusFromFocus = (float) (semiLatusRectum / (1.0 + boundedEccentricity * Math.cos(trueAnomaly)));
+        float mu = G * (SUN_MASS + m);
+        float specificAngularMomentum = (float) Math.sqrt(mu * semiLatusRectum);
+
+        float x = (float) (cx + radiusFromFocus * Math.cos(trueAnomaly));
+        float y = (float) (cy + radiusFromFocus * Math.sin(trueAnomaly));
+        float vx = (float) (-mu / specificAngularMomentum * Math.sin(trueAnomaly));
+        float vy = (float) (mu / specificAngularMomentum * (boundedEccentricity + Math.cos(trueAnomaly)));
+        int planetIndex = bodyCount;
+        addBody(name, x, y, vx, vy, m, size, color, false);
+        if (bodyCount > planetIndex) {
+            orbitSemiMajorAu[planetIndex] = semiMajorAxisAu;
+            orbitEccentricity[planetIndex] = boundedEccentricity;
+        }
     }
 
     private void addBody(String name, float x, float y, float vx, float vy, float m, float r, Color color, boolean canEditMass) {
@@ -817,9 +1116,16 @@ public class GravityGPU extends Application {
         posX.set(i, x); posY.set(i, y);
         velX.set(i, vx); velY.set(i, vy);
         accX.set(i, 0); accY.set(i, 0);
+        nextAccX.set(i, 0); nextAccY.set(i, 0);
         mass.set(i, m); radius.set(i, r);
+        dashboardSpeed.set(i, (float) Math.sqrt(vx * vx + vy * vy));
+        dashboardAcceleration.set(i, 0.0f);
+        dashboardNearestDistance.set(i, 0.0f);
+        dashboardNearestIndex.set(i, -1);
         bodyColors[i] = color;
         editableMass[i] = canEditMass;
+        orbitSemiMajorAu[i] = 0.0f;
+        orbitEccentricity[i] = 0.0f;
         activeState.set(i, 1);
 
         bodyCount++;

@@ -6,11 +6,9 @@ import javafx.geometry.Rectangle2D;
 import javafx.scene.Scene;
 import javafx.scene.canvas.Canvas;
 import javafx.scene.canvas.GraphicsContext;
-import javafx.scene.control.Button;
-import javafx.scene.control.Label;
+import javafx.scene.control.*;
 import javafx.scene.input.KeyCode;
-import javafx.scene.layout.BorderPane;
-import javafx.scene.layout.VBox;
+import javafx.scene.layout.*;
 import javafx.scene.paint.Color;
 import javafx.stage.Screen;
 import javafx.stage.Stage;
@@ -26,11 +24,35 @@ public class GravitySystemCPU extends Application {
 
     private static final double SPEED_FACTOR = 0.1;
     private static final double G = 1000.0 * (SPEED_FACTOR * SPEED_FACTOR);
-    private static final double SUN_MASS = 100000.0;
-    private static final double EARTH_ORBIT_R = 140.0;
+    private static final double SUN_MASS = 332946.0;
+    private static final double PHYSICS_UNITS_PER_AU = 140.0;
+    private static final double ASTRONOMICAL_UNIT_KM = 149_597_870.7;
+    private static final double EARTH_ORBITAL_SPEED_KM_PER_SECOND = 29.78;
     private static final double VELOCITY_SCALE = 0.085;
     private static final double MAX_CREATED_BODY_RADIUS = 20.0;
     private static final double CENTER_COLLISION_EPSILON = 0.5;
+    private static final double MIN_PLANET_ORBIT_RADIUS = 55.0;
+    private static final double ORBIT_EDGE_PADDING = 50.0;
+    private static final double MERCURY_AU = 0.387;
+    private static final double VENUS_AU = 0.723;
+    private static final double EARTH_AU = 1.000;
+    private static final double MARS_AU = 1.524;
+    private static final double JUPITER_AU = 5.203;
+    private static final double SATURN_AU = 9.537;
+    private static final double URANUS_AU = 19.191;
+    private static final double NEPTUNE_AU = 30.070;
+    private static final double MERCURY_ECCENTRICITY = 0.2056;
+    private static final double VENUS_ECCENTRICITY = 0.0068;
+    private static final double EARTH_ECCENTRICITY = 0.0167;
+    private static final double MARS_ECCENTRICITY = 0.0934;
+    private static final double JUPITER_ECCENTRICITY = 0.0489;
+    private static final double SATURN_ECCENTRICITY = 0.0565;
+    private static final double URANUS_ECCENTRICITY = 0.0472;
+    private static final double NEPTUNE_ECCENTRICITY = 0.0086;
+    private static final double[] STABLE_ORBIT_PHASES = {
+            0.10, 1.65, 3.15, 4.85,
+            0.75, 2.85, 4.95, 5.65
+    };
 
     private enum CreationState { IDLE, SIZING_MASS, SELECTING_VECTOR }
     private CreationState creationState = CreationState.IDLE;
@@ -40,6 +62,7 @@ public class GravitySystemCPU extends Application {
     private double createdRadius = 5.0;
     private double vectorEndX, vectorEndY;
     private int customBodyCount = 0;
+    private boolean alignPlanetsOnReset = false;
 
     public static class Body {
         String name;
@@ -65,9 +88,9 @@ public class GravitySystemCPU extends Application {
             return Math.sqrt(vx * vx + vy * vy);
         }
 
-        public void addTrailPoint() {
-            trailX.add(x);
-            trailY.add(y);
+        public void addTrailPoint(double screenX, double screenY) {
+            trailX.add(screenX);
+            trailY.add(screenY);
             if (trailX.size() > 220) {
                 trailX.removeFirst();
                 trailY.removeFirst();
@@ -106,13 +129,15 @@ public class GravitySystemCPU extends Application {
                 double dx = event.getX() - bodyX;
                 double dy = event.getY() - bodyY;
 
-                double vx = dx * VELOCITY_SCALE;
-                double vy = dy * VELOCITY_SCALE;
+                double velocityScale = physicsUnitsPerScreenPixelAtEarthOrbit() * VELOCITY_SCALE;
+                double vx = dx * velocityScale;
+                double vy = dy * velocityScale;
 
                 customBodyCount++;
                 Body customBody = new Body(
                         String.format("Body #%d", customBodyCount),
-                        bodyX, bodyY, vx, vy, createdMass, createdRadius, Color.RED
+                        physicsXForScreen(bodyX, bodyY), physicsYForScreen(bodyX, bodyY),
+                        vx, vy, createdMass, createdRadius, Color.RED
                 );
                 bodies.add(customBody);
 
@@ -161,16 +186,27 @@ public class GravitySystemCPU extends Application {
         btnReset.setFocusTraversable(false);
         btnReset.setOnAction(_ -> resetSystem());
 
+        CheckBox alignPlanetsCheckbox = new CheckBox("Align planets on reset");
+        alignPlanetsCheckbox.setSelected(false);
+        alignPlanetsCheckbox.setFocusTraversable(false);
+        alignPlanetsCheckbox.setStyle("-fx-text-fill: #b8b8c8; -fx-font-family: monospace; -fx-font-size: 11px;");
+        alignPlanetsCheckbox.selectedProperty().addListener((_, _, selected) -> alignPlanetsOnReset = selected);
+
+        GridPane optionsGrid = new GridPane();
+        optionsGrid.setHgap(12);
+        optionsGrid.setVgap(4);
+        optionsGrid.add(alignPlanetsCheckbox, 0, 0);
+
         Label legend = new Label("""
                 M = mass [M_Earth]
                 R = body radius [px]
-                V = speed [px/s]
-                A = acceleration [px/s²]
-                X/Y = position [px]
-                Nearest = closest body and distance [px]""");
+                V = speed [km/s eq]
+                A = acceleration [m/s² eq]
+                X/Y = physical position [AU]
+                Nearest = closest body and distance [AU]""");
         legend.setStyle("-fx-text-fill: #b8b8c8; -fx-font-family: monospace; -fx-font-size: 11px; -fx-padding: 0 0 6 0;");
 
-        sidebar.getChildren().addAll(title, btnReset, legend, dashboardList);
+        sidebar.getChildren().addAll(title, btnReset, optionsGrid, legend, dashboardList);
 
         BorderPane root = new BorderPane();
         root.setCenter(canvas);
@@ -210,7 +246,7 @@ public class GravitySystemCPU extends Application {
                 frameCounter++;
                 if (frameCounter % 2 == 0) {
                     for (Body b : bodies) {
-                        b.addTrailPoint();
+                        b.addTrailPoint(screenXForPhysics(b.x, b.y), screenYForPhysics(b.x, b.y));
                     }
                 }
 
@@ -222,6 +258,8 @@ public class GravitySystemCPU extends Application {
                 gc.fillRect(0, 0, canvasWidth, canvasHeight);
 
                 for (Body b : bodies) {
+                    double screenX = screenXForPhysics(b.x, b.y);
+                    double screenY = screenYForPhysics(b.x, b.y);
                     gc.setStroke(b.color.deriveColor(0, 1, 1, 0.3));
                     gc.setLineWidth(1.0);
                     for (int k = 0; k < b.trailX.size() - 1; k++) {
@@ -229,7 +267,7 @@ public class GravitySystemCPU extends Application {
                     }
 
                     gc.setFill(b.color);
-                    gc.fillOval(b.x - b.radius, b.y - b.radius, b.radius * 2, b.radius * 2);
+                    gc.fillOval(screenX - b.radius, screenY - b.radius, b.radius * 2, b.radius * 2);
                 }
 
                 // Body creation visualization.
@@ -250,13 +288,14 @@ public class GravitySystemCPU extends Application {
                     double dx = vectorEndX - bodyX;
                     double dy = vectorEndY - bodyY;
                     double vectorLength = Math.sqrt(dx * dx + dy * dy);
+                    double previewSpeed = speedToKilometersPerSecond(vectorLength * physicsUnitsPerScreenPixelAtEarthOrbit() * VELOCITY_SCALE);
 
                     gc.setStroke(Color.RED);
                     gc.setLineWidth(2.0);
                     gc.strokeLine(bodyX, bodyY, vectorEndX, vectorEndY);
 
                     gc.setFill(Color.WHITE);
-                    gc.fillText(String.format("Masa: %.1f M_Earth | V: %.2f px/s", createdMass, vectorLength * VELOCITY_SCALE), vectorEndX + 10, vectorEndY);
+                    gc.fillText(String.format("Masa: %.1f M_Earth | V: %.2f km/s", createdMass, previewSpeed), vectorEndX + 10, vectorEndY);
                 }
             }
         };
@@ -268,13 +307,17 @@ public class GravitySystemCPU extends Application {
         for (Body b : bodies) {
             Body nearest = findNearestBody(b);
             double acceleration = Math.sqrt(b.ax * b.ax + b.ay * b.ay);
+            double speed = speedToKilometersPerSecond(b.getSpeed());
+            double accelerationMetersPerSecondSquared = accelerationToMetersPerSecondSquared(acceleration);
+            double xAu = physicsDistanceToAu(b.x);
+            double yAu = physicsDistanceToAu(b.y);
             String nearestText = nearest == null
                     ? "Nearest: -"
-                    : String.format("Nearest: %s %.1fpx", nearest.name, distanceBetween(b, nearest));
+                    : String.format("Nearest: %s %.3fAU", nearest.name, physicsDistanceToAu(distanceBetween(b, nearest)));
             Label lbl = new Label(String.format(
                     "%-10s | M:%8.2f | R:%4.1f%nV:%7.2f | A:%7.3f | X:%6.1f Y:%6.1f%n%s",
                     b.name, b.mass, b.radius,
-                    b.getSpeed(), acceleration, b.x, b.y,
+                    speed, accelerationMetersPerSecondSquared, xAu, yAu,
                     nearestText
             ));
             String hexColor = toHex(b.color);
@@ -309,6 +352,99 @@ public class GravitySystemCPU extends Application {
         return Math.sqrt(dx * dx + dy * dy);
     }
 
+    private double screenXForPhysics(double physicsX, double physicsY) {
+        double physicsDistance = Math.sqrt(physicsX * physicsX + physicsY * physicsY);
+        if (physicsDistance <= 0.000001) {
+            return canvasWidth / 2.0;
+        }
+
+        double screenDistance = screenRadiusForPhysicsDistance(physicsDistance);
+        return canvasWidth / 2.0 + (physicsX / physicsDistance) * screenDistance;
+    }
+
+    private double screenYForPhysics(double physicsX, double physicsY) {
+        double physicsDistance = Math.sqrt(physicsX * physicsX + physicsY * physicsY);
+        if (physicsDistance <= 0.000001) {
+            return canvasHeight / 2.0;
+        }
+
+        double screenDistance = screenRadiusForPhysicsDistance(physicsDistance);
+        return canvasHeight / 2.0 + (physicsY / physicsDistance) * screenDistance;
+    }
+
+    private double physicsXForScreen(double screenX, double screenY) {
+        double dx = screenX - canvasWidth / 2.0;
+        double dy = screenY - canvasHeight / 2.0;
+        double screenDistance = Math.sqrt(dx * dx + dy * dy);
+        if (screenDistance <= 0.000001) {
+            return 0.0;
+        }
+
+        double physicsDistance = physicsRadiusForScreenDistance(screenDistance);
+        return dx / screenDistance * physicsDistance;
+    }
+
+    private double physicsYForScreen(double screenX, double screenY) {
+        double dx = screenX - canvasWidth / 2.0;
+        double dy = screenY - canvasHeight / 2.0;
+        double screenDistance = Math.sqrt(dx * dx + dy * dy);
+        if (screenDistance <= 0.000001) {
+            return 0.0;
+        }
+
+        double physicsDistance = physicsRadiusForScreenDistance(screenDistance);
+        return dy / screenDistance * physicsDistance;
+    }
+
+    private double screenRadiusForPhysicsDistance(double physicsDistance) {
+        double au = physicsDistanceToAu(physicsDistance);
+        if (au <= MERCURY_AU) {
+            return MIN_PLANET_ORBIT_RADIUS * au / MERCURY_AU;
+        }
+
+        return orbitRadiusForAu(au);
+    }
+
+    private double physicsRadiusForScreenDistance(double screenDistance) {
+        if (screenDistance <= MIN_PLANET_ORBIT_RADIUS) {
+            return physicalRadiusForAu(MERCURY_AU) * screenDistance / MIN_PLANET_ORBIT_RADIUS;
+        }
+
+        double maxOrbitRadius = Math.max(MIN_PLANET_ORBIT_RADIUS + 1.0, Math.min(canvasWidth, canvasHeight) / 2.0 - ORBIT_EDGE_PADDING);
+        double normalized = (screenDistance - MIN_PLANET_ORBIT_RADIUS) / (maxOrbitRadius - MIN_PLANET_ORBIT_RADIUS);
+        normalized = Math.max(0.0, Math.min(1.0, normalized));
+        double minLog = Math.log(MERCURY_AU);
+        double maxLog = Math.log(NEPTUNE_AU);
+        return physicalRadiusForAu(Math.exp(minLog + normalized * (maxLog - minLog)));
+    }
+
+    private double physicsUnitsPerScreenPixelAtEarthOrbit() {
+        return physicalRadiusForAu(EARTH_AU) / orbitRadiusForAu(EARTH_AU);
+    }
+
+    private double physicsDistanceToAu(double physicsDistance) {
+        return physicsDistance / PHYSICS_UNITS_PER_AU;
+    }
+
+    private double speedToKilometersPerSecond(double simulationSpeed) {
+        double earthSimulationSpeed = Math.sqrt(G * (SUN_MASS + 1.0) / physicalRadiusForAu(EARTH_AU));
+        return simulationSpeed / earthSimulationSpeed * EARTH_ORBITAL_SPEED_KM_PER_SECOND;
+    }
+
+    private double accelerationToMetersPerSecondSquared(double simulationAcceleration) {
+        double realSecondsPerSimulationSecond = realSecondsPerSimulationSecond();
+        double kilometersPerSimulationUnit = ASTRONOMICAL_UNIT_KM / PHYSICS_UNITS_PER_AU;
+        double kilometersPerSecondSquared = simulationAcceleration * kilometersPerSimulationUnit
+                / (realSecondsPerSimulationSecond * realSecondsPerSimulationSecond);
+        return kilometersPerSecondSquared * 1000.0;
+    }
+
+    private double realSecondsPerSimulationSecond() {
+        double earthSimulationSpeed = Math.sqrt(G * (SUN_MASS + 1.0) / physicalRadiusForAu(EARTH_AU));
+        return (EARTH_ORBITAL_SPEED_KM_PER_SECOND / earthSimulationSpeed)
+                / (ASTRONOMICAL_UNIT_KM / PHYSICS_UNITS_PER_AU);
+    }
+
     private double radiusForCreatedMass(double bodyMass) {
         return Math.min(MAX_CREATED_BODY_RADIUS, Math.max(3.0, 4.0 + Math.pow(bodyMass, 1.0 / 3.0) * 1.8));
     }
@@ -325,20 +461,23 @@ public class GravitySystemCPU extends Application {
         creationState = CreationState.IDLE;
         customBodyCount = 0;
 
-        double cx = canvasWidth / 2.0;
-        double cy = canvasHeight / 2.0;
+        double cx = 0.0;
+        double cy = 0.0;
 
         Body sun = new Body("Sun", cx, cy, 0, 0, SUN_MASS, 16, Color.GOLD);
         bodies.add(sun);
 
-        addKeplerPlanet("Mercury", cx, cy, 55.0,  0.055, 3.0, Color.GRAY);
-        addKeplerPlanet("Venus",   cx, cy, 95.0,  0.815, 4.5, Color.BEIGE);
-        addKeplerPlanet("Earth",   cx, cy, EARTH_ORBIT_R, 1.000, 5.0, Color.DODGERBLUE);
-        addKeplerPlanet("Mars",    cx, cy, 185.0, 0.107, 4.0, Color.INDIANRED);
-        addKeplerPlanet("Jupiter", cx, cy, 245.0, 317.8, 11.0, Color.PERU);
-        addKeplerPlanet("Saturn",  cx, cy, 305.0, 95.2,  9.0, Color.BURLYWOOD);
-        addKeplerPlanet("Uranus",  cx, cy, 365.0, 14.5,  7.0, Color.LIGHTBLUE);
-        addKeplerPlanet("Neptune", cx, cy, 420.0, 17.1,  7.0, Color.ROYALBLUE);
+        double[] orbitAngles = resetOrbitAngles();
+
+        // Planets use real mass ratios in Earth masses, real eccentricities, and Keplerian start velocities.
+        addKeplerPlanet("Mercury", cx, cy, MERCURY_AU, MERCURY_ECCENTRICITY, 0.055, 3.0, Color.GRAY, orbitAngles[0]);
+        addKeplerPlanet("Venus",   cx, cy, VENUS_AU,   VENUS_ECCENTRICITY,   0.815, 4.5, Color.BEIGE, orbitAngles[1]);
+        addKeplerPlanet("Earth",   cx, cy, EARTH_AU,   EARTH_ECCENTRICITY,   1.000, 5.0, Color.DODGERBLUE, orbitAngles[2]);
+        addKeplerPlanet("Mars",    cx, cy, MARS_AU,    MARS_ECCENTRICITY,    0.107, 4.0, Color.INDIANRED, orbitAngles[3]);
+        addKeplerPlanet("Jupiter", cx, cy, JUPITER_AU, JUPITER_ECCENTRICITY, 317.8, 11.0, Color.PERU, orbitAngles[4]);
+        addKeplerPlanet("Saturn",  cx, cy, SATURN_AU,  SATURN_ECCENTRICITY,  95.2,  9.0, Color.BURLYWOOD, orbitAngles[5]);
+        addKeplerPlanet("Uranus",  cx, cy, URANUS_AU,  URANUS_ECCENTRICITY,  14.5,  7.0, Color.LIGHTBLUE, orbitAngles[6]);
+        addKeplerPlanet("Neptune", cx, cy, NEPTUNE_AU, NEPTUNE_ECCENTRICITY, 17.1,  7.0, Color.ROYALBLUE, orbitAngles[7]);
 
         double totalPx = 0, totalPy = 0;
         for (int i = 1; i < bodies.size(); i++) {
@@ -352,9 +491,48 @@ public class GravitySystemCPU extends Application {
         computeAccelerations();
     }
 
-    private void addKeplerPlanet(String name, double cx, double cy, double orbitR, double mass, double size, Color color) {
-        double v = Math.sqrt(G * (SUN_MASS + mass) / orbitR);
-        bodies.add(new Body(name, cx + orbitR, cy, 0, v, mass, size, color));
+    private double[] resetOrbitAngles() {
+        double[] angles = new double[8];
+        if (alignPlanetsOnReset) {
+            return angles;
+        }
+
+        double baseAngle = Math.random() * Math.PI * 2.0;
+        double jitterRange = Math.PI / 45.0;
+        for (int i = 0; i < angles.length; i++) {
+            double jitter = (Math.random() * 2.0 - 1.0) * jitterRange;
+            angles[i] = baseAngle + STABLE_ORBIT_PHASES[i] + jitter;
+        }
+
+        return angles;
+    }
+
+    private double orbitRadiusForAu(double semiMajorAxisAu) {
+        double minLog = Math.log(MERCURY_AU);
+        double maxLog = Math.log(NEPTUNE_AU);
+        double orbitLog = Math.log(Math.max(MERCURY_AU, semiMajorAxisAu));
+        double normalized = (orbitLog - minLog) / (maxLog - minLog);
+        double maxOrbitRadius = Math.max(MIN_PLANET_ORBIT_RADIUS + 1.0, Math.min(canvasWidth, canvasHeight) / 2.0 - ORBIT_EDGE_PADDING);
+        return MIN_PLANET_ORBIT_RADIUS + normalized * (maxOrbitRadius - MIN_PLANET_ORBIT_RADIUS);
+    }
+
+    private double physicalRadiusForAu(double semiMajorAxisAu) {
+        return semiMajorAxisAu * PHYSICS_UNITS_PER_AU;
+    }
+
+    private void addKeplerPlanet(String name, double cx, double cy, double semiMajorAxisAu, double eccentricity, double mass, double size, Color color, double trueAnomaly) {
+        double semiMajorAxis = physicalRadiusForAu(semiMajorAxisAu);
+        double boundedEccentricity = Math.max(0.0, Math.min(0.95, eccentricity));
+        double semiLatusRectum = semiMajorAxis * (1.0 - boundedEccentricity * boundedEccentricity);
+        double radiusFromFocus = semiLatusRectum / (1.0 + boundedEccentricity * Math.cos(trueAnomaly));
+        double mu = G * (SUN_MASS + mass);
+        double specificAngularMomentum = Math.sqrt(mu * semiLatusRectum);
+
+        double x = cx + radiusFromFocus * Math.cos(trueAnomaly);
+        double y = cy + radiusFromFocus * Math.sin(trueAnomaly);
+        double vx = -mu / specificAngularMomentum * Math.sin(trueAnomaly);
+        double vy = mu / specificAngularMomentum * (boundedEccentricity + Math.cos(trueAnomaly));
+        bodies.add(new Body(name, x, y, vx, vy, mass, size, color));
     }
 
     private void physicsStepVerlet(double dt) {
