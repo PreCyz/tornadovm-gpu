@@ -21,9 +21,6 @@ import uk.ac.manchester.tornado.api.enums.DataTransferMode;
 import uk.ac.manchester.tornado.api.types.arrays.FloatArray;
 import uk.ac.manchester.tornado.api.types.arrays.IntArray;
 
-import java.util.HashMap;
-import java.util.Map;
-
 public class GravityGPU extends Application {
 
     private static final int CANVAS_WIDTH = 1250;
@@ -145,7 +142,6 @@ public class GravityGPU extends Application {
     private final TextField[] velocityXFields = new TextField[MAX_BODIES];
     private final TextField[] velocityYFields = new TextField[MAX_BODIES];
     private final TextField[] velocityZFields = new TextField[MAX_BODIES];
-    private final Map<Color, SpherePaint> spherePaints = new HashMap<>();
 
     private int bodyCount = 0;
 
@@ -243,7 +239,7 @@ public class GravityGPU extends Application {
         VBox sidebar = new VBox(10);
         sidebar.setStyle(String.format("-fx-background-color: #111118; -fx-padding: 15; -fx-min-width: %dpx; -fx-pref-width: %dpx; -fx-border-color: #333344; -fx-border-width: 0 0 0 1;", SIDEBAR_WIDTH, SIDEBAR_WIDTH));
 
-        Label title = new Label("NBody DASHBOARD");
+        Label title = new Label("Dashboard");
         title.setStyle("-fx-text-fill: #00ff88; -fx-font-weight: bold; -fx-font-size: 13px;");
 
         Button btnReset = new Button("RESET (SPACE)");
@@ -313,10 +309,10 @@ public class GravityGPU extends Application {
         secondColumn.setPercentWidth(50.0);
         optionsGrid.getColumnConstraints().addAll(firstColumn, secondColumn);
         optionsGrid.add(alignPlanetsCheckbox, 0, 0);
-        optionsGrid.add(orbitGuidesCheckbox, 1, 0);
+        optionsGrid.add(habitableZoneCheckbox, 1, 0);
         optionsGrid.add(trailsCheckbox, 0, 1);
         optionsGrid.add(weakSunGravityCheckbox, 1, 1);
-        optionsGrid.add(habitableZoneCheckbox, 0, 2);
+        optionsGrid.add(orbitGuidesCheckbox, 0, 2);
         optionsGrid.add(asteroidBeltCheckbox, 1, 2);
 
         Label legend = new Label("""
@@ -344,7 +340,7 @@ public class GravityGPU extends Application {
             }
         });
 
-        primaryStage.setTitle("N-Body Gravity Simulator");
+        primaryStage.setTitle("GPU N-Body Simulator");
         primaryStage.setScene(scene);
         primaryStage.setX(screenBounds.getMinX());
         primaryStage.setY(screenBounds.getMinY());
@@ -393,6 +389,9 @@ public class GravityGPU extends Application {
                 gc.setTextAlign(TextAlignment.CENTER);
                 gc.setTextBaseline(VPos.BOTTOM);
                 gc.setFont(Font.font("SansSerif", 11));
+                int sunIndex = findSunIndex();
+                float sunScreenX = sunIndex >= 0 ? projectedScreenX.get(sunIndex) : (float) (canvasWidth * 0.5);
+                float sunScreenY = sunIndex >= 0 ? projectedScreenY.get(sunIndex) : (float) (canvasHeight * 0.5);
 
                 for (int i = 0; i < bodyCount; i++) {
                     float screenX = projectedScreenX.get(i);
@@ -416,7 +415,7 @@ public class GravityGPU extends Application {
 
                     drawPlanetRings(gc, i, screenX, screenY, depthScale);
 
-                    drawSphere(gc, screenX, screenY, renderRadius, bodyColors[i]);
+                    drawSphere(gc, screenX, screenY, renderRadius, bodyColors[i], sunScreenX - screenX, sunScreenY - screenY);
 
                     gc.setFill(bodyLabelColors[i]);
                     gc.fillText(bodyNames[i], screenX, screenY - renderRadius - 4);
@@ -428,8 +427,8 @@ public class GravityGPU extends Application {
         timer.start();
     }
 
-    private void drawSphere(GraphicsContext gc, float centerX, float centerY, float sphereRadius, Color baseColor) {
-        SpherePaint paint = spherePaints.computeIfAbsent(baseColor, this::createSpherePaint);
+    private void drawSphere(GraphicsContext gc, float centerX, float centerY, float sphereRadius, Color baseColor, float lightDx, float lightDy) {
+        SpherePaint paint = createSpherePaint(baseColor, lightDx, lightDy);
         double diameter = sphereRadius * 2.0;
         gc.setFill(paint.gradient());
         gc.fillOval(centerX - sphereRadius, centerY - sphereRadius, diameter, diameter);
@@ -438,15 +437,18 @@ public class GravityGPU extends Application {
         gc.strokeOval(centerX - sphereRadius, centerY - sphereRadius, diameter, diameter);
     }
 
-    private SpherePaint createSpherePaint(Color baseColor) {
+    private SpherePaint createSpherePaint(Color baseColor, float lightDx, float lightDy) {
         Color highlight = baseColor.deriveColor(0, 0.55, 1.65, 1.0);
         Color midtone = baseColor.deriveColor(0, 1.0, 1.05, 1.0);
         Color shadow = baseColor.deriveColor(0, 1.15, 0.38, 1.0);
         Color rim = baseColor.deriveColor(0, 0.8, 1.25, 0.42);
+        double lightLength = Math.sqrt(lightDx * lightDx + lightDy * lightDy);
+        double focusAngle = lightLength <= 0.0001 ? -135.0 : Math.toDegrees(Math.atan2(lightDy, lightDx));
+        double focusDistance = lightLength <= 0.0001 ? 0.28 : 0.42;
 
         return new SpherePaint(new RadialGradient(
-                0.0, 0.0,
-                0.32, 0.28,
+                focusAngle, focusDistance,
+                0.5, 0.5,
                 0.74,
                 true,
                 CycleMethod.NO_CYCLE,
@@ -698,9 +700,8 @@ public class GravityGPU extends Application {
             return;
         }
 
-        ScreenPoint sunPoint = projectPhysics(posX.get(sunIndex), posY.get(sunIndex), posZ.get(sunIndex));
-        float sunX = sunPoint.x();
-        float sunY = sunPoint.y();
+        float sunX = projectedScreenX.get(sunIndex);
+        float sunY = projectedScreenY.get(sunIndex);
         float sunMass = mass.get(sunIndex);
         if (showHabitableZone) {
             drawHabitableZone(gc, sunX, sunY, sunMass);
@@ -784,6 +785,9 @@ public class GravityGPU extends Application {
         float sunPhysicsX = posX.get(sunIndex);
         float sunPhysicsY = posY.get(sunIndex);
         float sunPhysicsZ = posZ.get(sunIndex);
+        float sunScreenX = projectedScreenX.get(sunIndex);
+        float sunScreenY = projectedScreenY.get(sunIndex);
+        ScreenPoint projectedSunPoint = projectPhysics(sunPhysicsX, sunPhysicsY, sunPhysicsZ);
         final int segments = 180;
 
         gc.setLineDashes(10.0, 8.0);
@@ -798,11 +802,13 @@ public class GravityGPU extends Application {
                     (float) (sunPhysicsY + boundaryRadius * Math.sin(angle)),
                     sunPhysicsZ
             );
+            double centeredX = sunScreenX + point.x() - projectedSunPoint.x();
+            double centeredY = sunScreenY + point.y() - projectedSunPoint.y();
             if (segment > 0) {
-                gc.strokeLine(previousX, previousY, point.x(), point.y());
+                gc.strokeLine(previousX, previousY, centeredX, centeredY);
             }
-            previousX = point.x();
-            previousY = point.y();
+            previousX = centeredX;
+            previousY = centeredY;
         }
         gc.setLineDashes();
 
@@ -811,7 +817,8 @@ public class GravityGPU extends Application {
         gc.setTextBaseline(VPos.CENTER);
         gc.setFill(Color.rgb(130, 210, 255, 0.82));
         gc.fillText(String.format("< %.5f m/s2", WEAK_SUN_GRAVITY_THRESHOLD_METERS_PER_SECOND_SQUARED),
-                labelPoint.x() + 8.0, labelPoint.y());
+                sunScreenX + labelPoint.x() - projectedSunPoint.x() + 8.0,
+                sunScreenY + labelPoint.y() - projectedSunPoint.y());
     }
 
     private ScreenPoint projectPhysics(float physicsX, float physicsY, float physicsZ) {
@@ -1470,6 +1477,9 @@ public class GravityGPU extends Application {
     }
 
     private void applyPositionFields(int i) {
+        if (!hasEditablePositionFields(i)) {
+            return;
+        }
         try {
             float newX = parseField(positionXFields[i]) * PHYSICS_UNITS_PER_AU;
             float newY = parseField(positionYFields[i]) * PHYSICS_UNITS_PER_AU;
@@ -1501,6 +1511,9 @@ public class GravityGPU extends Application {
     }
 
     private void applyVelocityFields(int i) {
+        if (!hasEditableVelocityFields(i)) {
+            return;
+        }
         try {
             velX.set(i, kilometersPerSecondToSimulationSpeed(parseField(velocityXFields[i])));
             velY.set(i, kilometersPerSecondToSimulationSpeed(parseField(velocityYFields[i])));
@@ -1512,7 +1525,28 @@ public class GravityGPU extends Application {
     }
 
     private float parseField(TextField field) {
+        if (field == null) {
+            throw new NumberFormatException("Missing editable field");
+        }
         return Float.parseFloat(field.getText().trim().replace(',', '.'));
+    }
+
+    private boolean hasEditablePositionFields(int i) {
+        return isActiveEditableBodyIndex(i)
+                && positionXFields[i] != null
+                && positionYFields[i] != null
+                && positionZFields[i] != null;
+    }
+
+    private boolean hasEditableVelocityFields(int i) {
+        return isActiveEditableBodyIndex(i)
+                && velocityXFields[i] != null
+                && velocityYFields[i] != null
+                && velocityZFields[i] != null;
+    }
+
+    private boolean isActiveEditableBodyIndex(int i) {
+        return i >= 0 && i < bodyCount && activeState.get(i) == 1 && editableMass[i];
     }
 
     private void updateEditableFields(int i) {
