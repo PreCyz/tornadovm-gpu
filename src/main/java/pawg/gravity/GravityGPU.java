@@ -126,8 +126,28 @@ public class GravityGPU extends Application {
     private boolean showOrbitGuides = false;
 
     private final VBox dashboardList = new VBox(6);
+    private Label elapsedTimeLabel;
     private double canvasWidth = CANVAS_WIDTH;
     private double canvasHeight = HEIGHT;
+    private long simulationStartNanos = -1L;
+
+    private static String formatElapsedTime(long elapsedSeconds) {
+        long days = elapsedSeconds / 86_400;
+        long hours = (elapsedSeconds % 86_400) / 3_600;
+        long minutes = (elapsedSeconds % 3_600) / 60;
+        long seconds = elapsedSeconds % 60;
+
+        if (days > 0) {
+            return String.format("%dd %02dh %02dm %02ds", days, hours, minutes, seconds);
+        }
+        if (hours > 0) {
+            return String.format("%dh %02dm %02ds", hours, minutes, seconds);
+        }
+        if (minutes > 0) {
+            return String.format("%dm %02ds", minutes, seconds);
+        }
+        return seconds + "s";
+    }
 
     @Override
     public void start(Stage primaryStage) {
@@ -210,6 +230,12 @@ public class GravityGPU extends Application {
         btnReset.setFocusTraversable(false);
         btnReset.setOnAction(_ -> resetSystem());
 
+        elapsedTimeLabel = new Label("Time: 0s");
+        elapsedTimeLabel.setStyle("-fx-text-fill: #00ff88; -fx-font-family: monospace; -fx-font-size: 12px; -fx-font-weight: bold; -fx-padding: 4 0 0 0;");
+
+        HBox resetRow = new HBox(12, btnReset, elapsedTimeLabel);
+        resetRow.setStyle("-fx-alignment: center-left;");
+
         CheckBox alignPlanetsCheckbox = new CheckBox("Align planets on reset");
         alignPlanetsCheckbox.setSelected(false);
         alignPlanetsCheckbox.setFocusTraversable(false);
@@ -249,7 +275,7 @@ public class GravityGPU extends Application {
                 Nearest = closest body and distance [AU]""");
         legend.setStyle("-fx-text-fill: #b8b8c8; -fx-font-family: monospace; -fx-font-size: 11px; -fx-padding: 0 0 6 0;");
 
-        sidebar.getChildren().addAll(title, btnReset, optionsGrid, habitableZoneCheckbox, asteroidBeltCheckbox, legend, dashboardList);
+        sidebar.getChildren().addAll(title, resetRow, optionsGrid, habitableZoneCheckbox, asteroidBeltCheckbox, legend, dashboardList);
 
         BorderPane root = new BorderPane();
         root.setCenter(canvas);
@@ -277,6 +303,11 @@ public class GravityGPU extends Application {
 
             @Override
             public void handle(long now) {
+                if (simulationStartNanos < 0) {
+                    simulationStartNanos = now;
+                }
+                elapsedTimeLabel.setText("Time: " + formatElapsedTime((now - simulationStartNanos) / 1_000_000_000L));
+
                 updateSimulationState();
                 executionPlan.execute();
                 resolveCollisions();
@@ -1005,6 +1036,11 @@ public class GravityGPU extends Application {
     }
 
     private void resetSystem() {
+        simulationStartNanos = -1L;
+        if (elapsedTimeLabel != null) {
+            elapsedTimeLabel.setText("Time: 0s");
+        }
+
         bodyCount = 0;
         customBodyCount = 0;
         creationState = CreationState.IDLE;
