@@ -1,4 +1,4 @@
-package pawg.gravity;
+package pawg.nbody;
 
 import javafx.animation.AnimationTimer;
 import javafx.application.Application;
@@ -412,7 +412,7 @@ public class GravitySystemCPU extends Application {
 
         double maxOrbitRadius = Math.max(MIN_PLANET_ORBIT_RADIUS + 1.0, Math.min(canvasWidth, canvasHeight) / 2.0 - ORBIT_EDGE_PADDING);
         double normalized = (screenDistance - MIN_PLANET_ORBIT_RADIUS) / (maxOrbitRadius - MIN_PLANET_ORBIT_RADIUS);
-        normalized = Math.max(0.0, Math.min(1.0, normalized));
+        normalized = Math.clamp(normalized, 0.0, 1.0);
         double minLog = Math.log(MERCURY_AU);
         double maxLog = Math.log(NEPTUNE_AU);
         return physicalRadiusForAu(Math.exp(minLog + normalized * (maxLog - minLog)));
@@ -446,7 +446,7 @@ public class GravitySystemCPU extends Application {
     }
 
     private double radiusForCreatedMass(double bodyMass) {
-        return Math.min(MAX_CREATED_BODY_RADIUS, Math.max(3.0, 4.0 + Math.pow(bodyMass, 1.0 / 3.0) * 1.8));
+        return Math.clamp(4.0 + Math.pow(bodyMass, 1.0 / 3.0) * 1.8, 3.0, MAX_CREATED_BODY_RADIUS);
     }
 
     private String toHex(Color c) {
@@ -522,7 +522,7 @@ public class GravitySystemCPU extends Application {
 
     private void addKeplerPlanet(String name, double cx, double cy, double semiMajorAxisAu, double eccentricity, double mass, double size, Color color, double trueAnomaly) {
         double semiMajorAxis = physicalRadiusForAu(semiMajorAxisAu);
-        double boundedEccentricity = Math.max(0.0, Math.min(0.95, eccentricity));
+        double boundedEccentricity = Math.clamp(eccentricity, 0.0, 0.95);
         double semiLatusRectum = semiMajorAxis * (1.0 - boundedEccentricity * boundedEccentricity);
         double radiusFromFocus = semiLatusRectum / (1.0 + boundedEccentricity * Math.cos(trueAnomaly));
         double mu = G * (SUN_MASS + mass);

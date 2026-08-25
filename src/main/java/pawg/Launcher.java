@@ -3,9 +3,12 @@ package pawg;
 import javafx.application.Application;
 import pawg.eclipse.SolarEclipseFX;
 import pawg.gameoflife.GameOfLifeInteractive;
-import pawg.gravity.*;
+import pawg.gravity.EarthOrbitGPU;
+import pawg.gravity.SolarSystemGPU;
 import pawg.heatdistribution.HeatDistributionConstantHeatersFX;
 import pawg.heatdistribution.HeatDistributionFX;
+import pawg.nbody.GravityGPU;
+import pawg.nbody.GravitySystemCPU;
 
 public class Launcher {
     static void main(String[] args) {
