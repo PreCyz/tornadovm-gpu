@@ -341,6 +341,7 @@ public class GravityGPU extends Application {
         });
 
         primaryStage.setTitle("GPU N-Body Simulator");
+        NBodyStageIcons.addJupiterIcon(primaryStage);
         primaryStage.setScene(scene);
         primaryStage.setX(screenBounds.getMinX());
         primaryStage.setY(screenBounds.getMinY());

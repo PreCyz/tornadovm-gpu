@@ -136,6 +136,7 @@ public class GravitySystemCPU extends Application {
         });
 
         primaryStage.setTitle("CPU NBody simulator");
+        NBodyStageIcons.addJupiterIcon(primaryStage);
         primaryStage.setScene(scene);
         primaryStage.setX(screenBounds.getMinX());
         primaryStage.setY(screenBounds.getMinY());
