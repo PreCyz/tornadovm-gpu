@@ -132,6 +132,124 @@ final class PhysicsKernels {
         }
     }
 
+    static void simulateVerletFrame(
+            FloatArray px, FloatArray py, FloatArray pz,
+            FloatArray vx, FloatArray vy, FloatArray vz,
+            FloatArray ax, FloatArray ay, FloatArray az,
+            FloatArray nextAx, FloatArray nextAy, FloatArray nextAz,
+            FloatArray m, IntArray active,
+            FloatArray params,
+            IntArray simulationState,
+            int subSteps) {
+
+        float gConst = params.get(0);
+        float dt = params.get(1);
+        float halfDt = 0.5f * dt;
+        float halfDtSq = 0.5f * dt * dt;
+        int numBodies = simulationState.get(0);
+
+        for (int i = 0; i < numBodies; i++) {
+            ax.set(i, 0.0f);
+            ay.set(i, 0.0f);
+            az.set(i, 0.0f);
+            if (active.get(i) == 0 || m.get(i) <= 0.0f) {
+                continue;
+            }
+
+            float pxi = px.get(i);
+            float pyi = py.get(i);
+            float pzi = pz.get(i);
+            float mi = m.get(i);
+            float fx = 0.0f;
+            float fy = 0.0f;
+            float fz = 0.0f;
+
+            for (int j = 0; j < numBodies; j++) {
+                if (i == j || active.get(j) == 0) {
+                    continue;
+                }
+
+                float dx = px.get(j) - pxi;
+                float dy = py.get(j) - pyi;
+                float dz = pz.get(j) - pzi;
+                float distSq = dx * dx + dy * dy + dz * dz + 35.0f;
+                float dist = TornadoMath.sqrt(distSq);
+                float force = (gConst * mi * m.get(j)) / distSq;
+
+                fx += force * (dx / dist);
+                fy += force * (dy / dist);
+                fz += force * (dz / dist);
+            }
+
+            ax.set(i, fx / mi);
+            ay.set(i, fy / mi);
+            az.set(i, fz / mi);
+        }
+
+        for (int step = 0; step < subSteps; step++) {
+            for (int i = 0; i < numBodies; i++) {
+                if (active.get(i) == 0) {
+                    continue;
+                }
+
+                px.set(i, px.get(i) + vx.get(i) * dt + ax.get(i) * halfDtSq);
+                py.set(i, py.get(i) + vy.get(i) * dt + ay.get(i) * halfDtSq);
+                pz.set(i, pz.get(i) + vz.get(i) * dt + az.get(i) * halfDtSq);
+            }
+
+            for (int i = 0; i < numBodies; i++) {
+                nextAx.set(i, 0.0f);
+                nextAy.set(i, 0.0f);
+                nextAz.set(i, 0.0f);
+                if (active.get(i) == 0 || m.get(i) <= 0.0f) {
+                    continue;
+                }
+
+                float pxi = px.get(i);
+                float pyi = py.get(i);
+                float pzi = pz.get(i);
+                float mi = m.get(i);
+                float fx = 0.0f;
+                float fy = 0.0f;
+                float fz = 0.0f;
+
+                for (int j = 0; j < numBodies; j++) {
+                    if (i == j || active.get(j) == 0) {
+                        continue;
+                    }
+
+                    float dx = px.get(j) - pxi;
+                    float dy = py.get(j) - pyi;
+                    float dz = pz.get(j) - pzi;
+                    float distSq = dx * dx + dy * dy + dz * dz + 35.0f;
+                    float dist = TornadoMath.sqrt(distSq);
+                    float force = (gConst * mi * m.get(j)) / distSq;
+
+                    fx += force * (dx / dist);
+                    fy += force * (dy / dist);
+                    fz += force * (dz / dist);
+                }
+
+                nextAx.set(i, fx / mi);
+                nextAy.set(i, fy / mi);
+                nextAz.set(i, fz / mi);
+            }
+
+            for (int i = 0; i < numBodies; i++) {
+                if (active.get(i) == 0) {
+                    continue;
+                }
+
+                vx.set(i, vx.get(i) + (ax.get(i) + nextAx.get(i)) * halfDt);
+                vy.set(i, vy.get(i) + (ay.get(i) + nextAy.get(i)) * halfDt);
+                vz.set(i, vz.get(i) + (az.get(i) + nextAz.get(i)) * halfDt);
+                ax.set(i, nextAx.get(i));
+                ay.set(i, nextAy.get(i));
+                az.set(i, nextAz.get(i));
+            }
+        }
+    }
+
     static void detectCollisions(
             FloatArray px, FloatArray py, FloatArray pz, FloatArray m,
             IntArray active,

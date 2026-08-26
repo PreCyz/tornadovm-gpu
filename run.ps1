@@ -14,6 +14,9 @@ $CLASSPATH = "target\classes;$OPENJFX\javafx-controls\25.0.2\javafx-controls-25.
 # 4. JVM flags that suppress warnings.
 #$JVM_FLAGS = "-Dtornado.debug=True -Dtornado.print.kernel=True --enable-native-access=ALL-UNNAMED --add-opens=java.base/java.lang=ALL-UNNAMED -Dprism.verbose=false"
 $JVM_FLAGS = "--enable-native-access=ALL-UNNAMED --add-opens=java.base/java.lang=ALL-UNNAMED -Dprism.verbose=false"
+if ($env:EXTRA_JVM_FLAGS) {
+    $JVM_FLAGS = "$JVM_FLAGS $env:EXTRA_JVM_FLAGS"
+}
 
 # 5. Launch TornadoVM.
 tornado --jvm="$JVM_FLAGS" --cp $CLASSPATH pawg.Launcher @args
