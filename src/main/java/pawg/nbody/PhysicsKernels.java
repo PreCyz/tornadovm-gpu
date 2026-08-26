@@ -5,7 +5,7 @@ import uk.ac.manchester.tornado.api.math.TornadoMath;
 import uk.ac.manchester.tornado.api.types.arrays.FloatArray;
 import uk.ac.manchester.tornado.api.types.arrays.IntArray;
 
-class PhysicsKernels {
+final class PhysicsKernels {
 
     private static final int DASHBOARD_METRIC_STRIDE = 7;
     private static final int DASHBOARD_DISTANCE_FROM_SUN_AU = 0;
@@ -16,6 +16,9 @@ class PhysicsKernels {
     private static final int DASHBOARD_ACCELERATION_Y_METERS_PER_SECOND_SQUARED = 5;
     private static final int DASHBOARD_ACCELERATION_Z_METERS_PER_SECOND_SQUARED = 6;
     private static final int TRAIL_CAPACITY = 180;
+
+    private PhysicsKernels() {
+    }
 
     static void clearCollisionTargets(IntArray collisionTarget, IntArray simulationState) {
         int numBodies = simulationState.get(0);
