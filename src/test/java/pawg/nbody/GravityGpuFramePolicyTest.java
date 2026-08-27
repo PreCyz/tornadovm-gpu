@@ -62,6 +62,18 @@ class GravityGpuFramePolicyTest {
     }
 
     @Test
+    void throttledReadbackReducesBlockingTornadoExecutions() {
+        int tenSecondsAtSixtyFps = 600;
+
+        assertEquals(600, GravityGpuFramePolicy.throttledStableSolarSystemTornadoExecutions(tenSecondsAtSixtyFps, 1));
+        assertEquals(300, GravityGpuFramePolicy.throttledStableSolarSystemTornadoExecutions(tenSecondsAtSixtyFps, 2));
+        assertEquals(200, GravityGpuFramePolicy.throttledStableSolarSystemTornadoExecutions(tenSecondsAtSixtyFps, 3));
+        assertTrue(GravityGpuFramePolicy.shouldExecuteSimulationSnapshotFrame(1, 2));
+        assertFalse(GravityGpuFramePolicy.shouldExecuteSimulationSnapshotFrame(2, 2));
+        assertTrue(GravityGpuFramePolicy.shouldExecuteSimulationSnapshotFrame(3, 2));
+    }
+
+    @Test
     void stableSolarSystemDoesNotRunOptionalTrailProjection() {
         assertFalse(GravityGpuFramePolicy.shouldProjectTrails(
                 false,

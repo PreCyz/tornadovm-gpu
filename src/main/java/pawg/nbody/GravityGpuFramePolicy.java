@@ -17,6 +17,11 @@ final class GravityGpuFramePolicy {
         return frameNumber > 0 && frameNumber % DASHBOARD_UPDATE_FRAMES == 0;
     }
 
+    static boolean shouldExecuteSimulationSnapshotFrame(int frameNumber, int readbackIntervalFrames) {
+        int interval = Math.max(1, readbackIntervalFrames);
+        return frameNumber > 0 && (frameNumber - 1) % interval == 0;
+    }
+
     static boolean shouldCheckCollisions(int bodyCount, int editableBodyCount) {
         return bodyCount > 1 && editableBodyCount > 0;
     }
@@ -34,6 +39,12 @@ final class GravityGpuFramePolicy {
 
     static int currentStableSolarSystemTornadoExecutions(int frameCount) {
         return Math.max(0, frameCount) * CURRENT_MANDATORY_TORNADO_EXECUTIONS_PER_FRAME;
+    }
+
+    static int throttledStableSolarSystemTornadoExecutions(int frameCount, int readbackIntervalFrames) {
+        int frames = Math.max(0, frameCount);
+        int interval = Math.max(1, readbackIntervalFrames);
+        return (frames + interval - 1) / interval;
     }
 
     static int legacyStableSolarSystemTornadoExecutions(int frameCount) {

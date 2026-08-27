@@ -40,6 +40,8 @@ public class GravityGPU extends Application {
     private static final float WEAK_SUN_GRAVITY_THRESHOLD_METERS_PER_SECOND_SQUARED = 0.00001f;
     private static final float CENTER_COLLISION_EPSILON = 0.5f;
     private static final int GPU_SUB_STEPS = 12;
+    private static final int GPU_READBACK_INTERVAL_FRAMES = Math.max(1, Integer.getInteger("gravitygpu.readback.interval", 2));
+    private static final int GPU_SUB_STEPS_PER_EXECUTION = GPU_SUB_STEPS * GPU_READBACK_INTERVAL_FRAMES;
     private static final boolean FRAME_TIMING_ENABLED = Boolean.getBoolean("gravitygpu.timing");
     private static final double FRAME_TIMING_SLOW_MS = Double.parseDouble(System.getProperty("gravitygpu.timing.slow.ms", "24.0"));
     private static final int FRAME_TIMING_SUMMARY_FRAMES = Integer.getInteger("gravitygpu.timing.summary.frames", 300);
@@ -110,6 +112,15 @@ public class GravityGPU extends Application {
     private final FloatArray dashboardAcceleration = new FloatArray(MAX_BODIES);
     private final FloatArray dashboardNearestDistance = new FloatArray(MAX_BODIES);
     private final FloatArray dashboardMetrics = new FloatArray(MAX_BODIES * DASHBOARD_METRIC_STRIDE);
+    private final float[] previousSnapshotPosX = new float[MAX_BODIES];
+    private final float[] previousSnapshotPosY = new float[MAX_BODIES];
+    private final float[] previousSnapshotPosZ = new float[MAX_BODIES];
+    private final float[] currentSnapshotPosX = new float[MAX_BODIES];
+    private final float[] currentSnapshotPosY = new float[MAX_BODIES];
+    private final float[] currentSnapshotPosZ = new float[MAX_BODIES];
+    private final float[] renderPosX = new float[MAX_BODIES];
+    private final float[] renderPosY = new float[MAX_BODIES];
+    private final float[] renderPosZ = new float[MAX_BODIES];
     private final float[] dashboardPreviousPosX = new float[MAX_BODIES];
     private final float[] dashboardPreviousPosY = new float[MAX_BODIES];
     private final float[] dashboardPreviousPosZ = new float[MAX_BODIES];
@@ -199,6 +210,7 @@ public class GravityGPU extends Application {
     private long displayedElapsedSeconds = -1L;
     private int projectedBodyCount = 0;
     private int framesSinceDashboardMetrics = 0;
+    private int visualFramesSinceSnapshot = GPU_READBACK_INTERVAL_FRAMES;
 
     private record ScreenPoint(float x, float y, float depthScale) {
     }
@@ -460,24 +472,36 @@ public class GravityGPU extends Application {
                 stageStartNanos = System.nanoTime();
                 if (showTrails && frameCounter % 2 == 0) {
                     for (int i = 0; i < bodyCount; i++) {
-                        appendTrailPoint(i, posX.get(i), posY.get(i), posZ.get(i));
+                        appendTrailPoint(i, renderPosX[i], renderPosY[i], renderPosZ[i]);
                     }
                 }
                 long trailAppendNanos = System.nanoTime() - stageStartNanos;
 
                 stageStartNanos = System.nanoTime();
-                updateSimulationState();
-                updateRenderParams();
-                rebuildSimulationPlanIfDirty();
-                executionPlan.execute();
-                framesSinceDashboardMetrics++;
+                boolean executedSimulationSnapshot = GravityGpuFramePolicy.shouldExecuteSimulationSnapshotFrame(frameCounter, GPU_READBACK_INTERVAL_FRAMES)
+                        || simulationPlanDirty
+                        || !simulationPlanReady;
+                if (executedSimulationSnapshot) {
+                    updateSimulationState();
+                    updateRenderParams();
+                    rebuildSimulationPlanIfDirty();
+                    executionPlan.execute();
+                    framesSinceDashboardMetrics += GPU_READBACK_INTERVAL_FRAMES;
+                    captureSimulationSnapshot();
+                    visualFramesSinceSnapshot = 0;
+                } else {
+                    visualFramesSinceSnapshot = Math.min(GPU_READBACK_INTERVAL_FRAMES, visualFramesSinceSnapshot + 1);
+                }
                 long simulationNanos = System.nanoTime() - stageStartNanos;
 
                 stageStartNanos = System.nanoTime();
-                detectAndResolveCollisionsOnCpu();
+                if (executedSimulationSnapshot) {
+                    detectAndResolveCollisionsOnCpu();
+                }
                 long collisionNanos = System.nanoTime() - stageStartNanos;
 
                 stageStartNanos = System.nanoTime();
+                updateInterpolatedRenderPositions();
                 projectBodiesOnCpu();
                 long projectionNanos = System.nanoTime() - stageStartNanos;
 
@@ -724,9 +748,9 @@ public class GravityGPU extends Application {
 
     private void drawOsculatingOrbitGuide(GraphicsContext gc, int sunIndex, int bodyIndex) {
         final int segments = 192;
-        double rx = posX.get(bodyIndex) - posX.get(sunIndex);
-        double ry = posY.get(bodyIndex) - posY.get(sunIndex);
-        double rz = posZ.get(bodyIndex) - posZ.get(sunIndex);
+        double rx = renderPosX[bodyIndex] - renderPosX[sunIndex];
+        double ry = renderPosY[bodyIndex] - renderPosY[sunIndex];
+        double rz = renderPosZ[bodyIndex] - renderPosZ[sunIndex];
         double vx = dashboardEstimatedVelX[bodyIndex] - dashboardEstimatedVelX[sunIndex];
         double vy = dashboardEstimatedVelY[bodyIndex] - dashboardEstimatedVelY[sunIndex];
         double vz = dashboardEstimatedVelZ[bodyIndex] - dashboardEstimatedVelZ[sunIndex];
@@ -805,9 +829,9 @@ public class GravityGPU extends Application {
             }
 
             double radiusFromFocus = semiLatusRectum / denominator;
-            float physicsX = (float) (posX.get(sunIndex) + radiusFromFocus * (cosAnomaly * eHatX + sinAnomaly * qHatX));
-            float physicsY = (float) (posY.get(sunIndex) + radiusFromFocus * (cosAnomaly * eHatY + sinAnomaly * qHatY));
-            float physicsZ = (float) (posZ.get(sunIndex) + radiusFromFocus * (cosAnomaly * eHatZ + sinAnomaly * qHatZ));
+            float physicsX = (float) (renderPosX[sunIndex] + radiusFromFocus * (cosAnomaly * eHatX + sinAnomaly * qHatX));
+            float physicsY = (float) (renderPosY[sunIndex] + radiusFromFocus * (cosAnomaly * eHatY + sinAnomaly * qHatY));
+            float physicsZ = (float) (renderPosZ[sunIndex] + radiusFromFocus * (cosAnomaly * eHatZ + sinAnomaly * qHatZ));
             ScreenPoint point = projectPhysics(physicsX, physicsY, physicsZ);
 
             if (segment == 0) {
@@ -911,9 +935,9 @@ public class GravityGPU extends Application {
         }
 
         float boundaryRadius = (float) Math.sqrt(G * sunMass / thresholdSimulationAcceleration);
-        float sunPhysicsX = posX.get(sunIndex);
-        float sunPhysicsY = posY.get(sunIndex);
-        float sunPhysicsZ = posZ.get(sunIndex);
+        float sunPhysicsX = renderPosX[sunIndex];
+        float sunPhysicsY = renderPosY[sunIndex];
+        float sunPhysicsZ = renderPosZ[sunIndex];
         float sunScreenX = projectedScreenX.get(sunIndex);
         float sunScreenY = projectedScreenY.get(sunIndex);
         ScreenPoint projectedSunPoint = projectPhysics(sunPhysicsX, sunPhysicsY, sunPhysicsZ);
@@ -1244,6 +1268,59 @@ public class GravityGPU extends Application {
         dashboardEstimatedAccZ[i] = 0.0f;
     }
 
+    private void captureSimulationSnapshot() {
+        for (int i = 0; i < MAX_BODIES; i++) {
+            previousSnapshotPosX[i] = currentSnapshotPosX[i];
+            previousSnapshotPosY[i] = currentSnapshotPosY[i];
+            previousSnapshotPosZ[i] = currentSnapshotPosZ[i];
+            currentSnapshotPosX[i] = posX.get(i);
+            currentSnapshotPosY[i] = posY.get(i);
+            currentSnapshotPosZ[i] = posZ.get(i);
+        }
+    }
+
+    private void resetBodySnapshots(int i) {
+        previousSnapshotPosX[i] = posX.get(i);
+        previousSnapshotPosY[i] = posY.get(i);
+        previousSnapshotPosZ[i] = posZ.get(i);
+        currentSnapshotPosX[i] = posX.get(i);
+        currentSnapshotPosY[i] = posY.get(i);
+        currentSnapshotPosZ[i] = posZ.get(i);
+        renderPosX[i] = posX.get(i);
+        renderPosY[i] = posY.get(i);
+        renderPosZ[i] = posZ.get(i);
+    }
+
+    private void clearBodySnapshots(int i) {
+        previousSnapshotPosX[i] = 0.0f;
+        previousSnapshotPosY[i] = 0.0f;
+        previousSnapshotPosZ[i] = 0.0f;
+        currentSnapshotPosX[i] = 0.0f;
+        currentSnapshotPosY[i] = 0.0f;
+        currentSnapshotPosZ[i] = 0.0f;
+        renderPosX[i] = 0.0f;
+        renderPosY[i] = 0.0f;
+        renderPosZ[i] = 0.0f;
+    }
+
+    private void updateInterpolatedRenderPositions() {
+        float alpha = GPU_READBACK_INTERVAL_FRAMES <= 1
+                ? 1.0f
+                : Math.clamp((float) visualFramesSinceSnapshot / GPU_READBACK_INTERVAL_FRAMES, 0.0f, 1.0f);
+        for (int i = 0; i < bodyCount; i++) {
+            if (activeState.get(i) == 0) {
+                renderPosX[i] = 0.0f;
+                renderPosY[i] = 0.0f;
+                renderPosZ[i] = 0.0f;
+                continue;
+            }
+
+            renderPosX[i] = previousSnapshotPosX[i] + (currentSnapshotPosX[i] - previousSnapshotPosX[i]) * alpha;
+            renderPosY[i] = previousSnapshotPosY[i] + (currentSnapshotPosY[i] - previousSnapshotPosY[i]) * alpha;
+            renderPosZ[i] = previousSnapshotPosZ[i] + (currentSnapshotPosZ[i] - previousSnapshotPosZ[i]) * alpha;
+        }
+    }
+
     private void projectBodiesOnCpu() {
         projectedBodyCount = bodyCount;
         for (int i = 0; i < bodyCount; i++) {
@@ -1254,7 +1331,7 @@ public class GravityGPU extends Application {
                 continue;
             }
 
-            ScreenPoint point = projectPhysics(posX.get(i), posY.get(i), posZ.get(i));
+            ScreenPoint point = projectPhysics(renderPosX[i], renderPosY[i], renderPosZ[i]);
             projectedScreenX.set(i, point.x());
             projectedScreenY.set(i, point.y());
             projectedDepthScale.set(i, point.depthScale());
@@ -1373,7 +1450,7 @@ public class GravityGPU extends Application {
                 .task("simulateFrame", PhysicsKernels::simulateVerletFrame,
                         posX, posY, posZ, velX, velY, velZ,
                         accX, accY, accZ, nextAccX, nextAccY, nextAccZ,
-                        mass, activeState, physParams, simulationState, GPU_SUB_STEPS)
+                        mass, activeState, physParams, simulationState, GPU_SUB_STEPS_PER_EXECUTION)
                 .transferToHost(DataTransferMode.EVERY_EXECUTION,
                         posX, posY, posZ);
 
@@ -1405,11 +1482,15 @@ public class GravityGPU extends Application {
         updateSimulationState();
         updateRenderParams();
         executionPlan.execute();
+        captureSimulationSnapshot();
+        visualFramesSinceSnapshot = GPU_READBACK_INTERVAL_FRAMES;
+        updateInterpolatedRenderPositions();
         projectBodiesOnCpu();
         trailProjectionPlan.execute();
         resetSystem();
         updateSimulationState();
         updateRenderParams();
+        updateInterpolatedRenderPositions();
         projectBodiesOnCpu();
         computeDashboardMetricsOnCpu();
         projectedTrailYaw = Float.NaN;
@@ -1551,6 +1632,7 @@ public class GravityGPU extends Application {
         dashboardAcceleration.set(survivor, 0.0f);
         dashboardNearestDistance.set(survivor, 0.0f);
         resetDashboardMotionEstimate(survivor);
+        resetBodySnapshots(survivor);
         clearDashboardMetrics(survivor);
         dashboardNearestIndex.set(survivor, -1);
         bodyNames[survivor] = bodyNames[survivor] + "+";
@@ -1613,6 +1695,15 @@ public class GravityGPU extends Application {
         dashboardEstimatedAccX[target] = dashboardEstimatedAccX[source];
         dashboardEstimatedAccY[target] = dashboardEstimatedAccY[source];
         dashboardEstimatedAccZ[target] = dashboardEstimatedAccZ[source];
+        previousSnapshotPosX[target] = previousSnapshotPosX[source];
+        previousSnapshotPosY[target] = previousSnapshotPosY[source];
+        previousSnapshotPosZ[target] = previousSnapshotPosZ[source];
+        currentSnapshotPosX[target] = currentSnapshotPosX[source];
+        currentSnapshotPosY[target] = currentSnapshotPosY[source];
+        currentSnapshotPosZ[target] = currentSnapshotPosZ[source];
+        renderPosX[target] = renderPosX[source];
+        renderPosY[target] = renderPosY[source];
+        renderPosZ[target] = renderPosZ[source];
         projectedScreenX.set(target, projectedScreenX.get(source));
         projectedScreenY.set(target, projectedScreenY.get(source));
         projectedDepthScale.set(target, projectedDepthScale.get(source));
@@ -1663,6 +1754,7 @@ public class GravityGPU extends Application {
         dashboardAcceleration.set(i, 0.0f);
         dashboardNearestDistance.set(i, 0.0f);
         clearDashboardMotionEstimate(i);
+        clearBodySnapshots(i);
         clearDashboardMetrics(i);
         dashboardNearestIndex.set(i, -1);
         projectedScreenX.set(i, 0.0f);
@@ -1813,6 +1905,7 @@ public class GravityGPU extends Application {
             posY.set(i, newY);
             posZ.set(i, newZ);
             resetDashboardPositionBaseline(i);
+            resetBodySnapshots(i);
             markSimulationPlanDirty();
             clearTrail(i);
             updateEditableFields(i);
@@ -1974,6 +2067,7 @@ public class GravityGPU extends Application {
             nextAccY.set(i, 0.0f);
             nextAccZ.set(i, 0.0f);
             clearDashboardMotionEstimate(i);
+            clearBodySnapshots(i);
             editableMass[i] = false;
             orbitSemiMajorAu[i] = 0.0f;
             orbitEccentricity[i] = 0.0f;
@@ -2019,8 +2113,10 @@ public class GravityGPU extends Application {
         velZ.set(0, -totalPz / mass.get(0));
         for (int i = 0; i < bodyCount; i++) {
             resetDashboardMotionEstimate(i);
+            resetBodySnapshots(i);
         }
         framesSinceDashboardMetrics = 0;
+        visualFramesSinceSnapshot = GPU_READBACK_INTERVAL_FRAMES;
         markSimulationPlanDirty();
     }
 
@@ -2127,6 +2223,7 @@ public class GravityGPU extends Application {
         orbitEccentricity[i] = 0.0f;
         activeState.set(i, 1);
         resetDashboardMotionEstimate(i);
+        resetBodySnapshots(i);
 
         bodyCount++;
     }

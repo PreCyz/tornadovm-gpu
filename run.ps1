@@ -7,7 +7,7 @@ $env:JAVA_HOME    = "C:\Install\Java\jdk-25.0.2"
 $env:PATH = "$env:TORNADO_HOME\bin;$env:JAVA_HOME\bin;$env:PATH"
 
 $OPENJFX = "$env:USERPROFILE\.m2\repository\org\openjfx\"
-$CONTROLSFX = "$env:USERPROFILE\.m2\repository\org\controlsfx\controlsfx\11.2.2\controlsfx-11.2.2.jar"
+$CONTROLSFX = "$env:USERPROFILE\.m2\repository\org\controlsfx\controlsfx\11.2.4\controlsfx-11.2.4.jar"
 
 # 3. Build the classpath.
 $CLASSPATH = "target\classes;$CONTROLSFX;$OPENJFX\javafx-controls\25.0.2\javafx-controls-25.0.2.jar;$OPENJFX\javafx-controls\25.0.2\javafx-controls-25.0.2-win.jar;$OPENJFX\javafx-graphics\25.0.2\javafx-graphics-25.0.2.jar;$OPENJFX\javafx-graphics\25.0.2\javafx-graphics-25.0.2-win.jar;$OPENJFX\javafx-base\25.0.2\javafx-base-25.0.2.jar;$OPENJFX\javafx-base\25.0.2\javafx-base-25.0.2-win.jar"

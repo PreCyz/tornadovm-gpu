@@ -22,8 +22,12 @@ import java.util.Arrays;
 import java.util.List;
 
 public final class TornadoDeviceSelector {
+    private static final String AUTO_DEFAULT_DEVICE_PROPERTY = "tornado.device.selector.default";
+
     public static TornadoDevice selectDevice(Stage owner) {
-        TornadoDeviceChoice choice = new TornadoDeviceSelector().showAndWait(owner);
+        TornadoDeviceChoice choice = Boolean.getBoolean(AUTO_DEFAULT_DEVICE_PROPERTY)
+                ? defaultDeviceChoice()
+                : new TornadoDeviceSelector().showAndWait(owner);
         return resolveDevice(owner, choice);
     }
 
@@ -90,6 +94,14 @@ public final class TornadoDeviceSelector {
         dialog.getDialogPane().setPrefSize(760, 520);
         dialog.setResultConverter(button -> button == startButtonType ? deviceCombo.getValue() : initialSelection);
         return dialog.showAndWait().orElse(initialSelection);
+    }
+
+    private static TornadoDeviceChoice defaultDeviceChoice() {
+        List<TornadoDeviceChoice> devices = TornadoDeviceCommand.detectDevices();
+        return devices.stream()
+                .filter(TornadoDeviceChoice::defaultDevice)
+                .findFirst()
+                .orElse(devices.getFirst());
     }
 
     private static TornadoDevice resolveDevice(Stage owner, TornadoDeviceChoice choice) {
