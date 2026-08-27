@@ -111,6 +111,34 @@ Run the GPU n-body gravity simulator:
 pwsh -File .\run.ps1 7
 ```
 
+Tune `GravityGPU` readback pacing with JVM system properties. These flags are useful when the simulation itself is fast on the GPU, but TornadoVM/OpenCL host synchronization causes visible pauses:
+
+```powershell
+$env:EXTRA_JVM_FLAGS = "-Dgravitygpu.render.readback.interval=2 -Dgravitygpu.state.readback.interval=30"
+pwsh -File .\run.ps1 7
+```
+
+- `gravitygpu.render.readback.interval` controls how often `GravityGPU` executes the main Tornado simulation/projection graph and reads projected screen coordinates back to JavaFX. The default is `2`, unless `gravitygpu.readback.interval` is set, in which case that older flag is used as the default value. Lower values update the rendered positions more often, but can increase GPU/host synchronization cost.
+- `gravitygpu.state.readback.interval` controls how often `GravityGPU` explicitly reads full physical positions (`posX`, `posY`, `posZ`) back from the device. The default is `30`, and it is clamped so it can never be lower than the render readback interval. Higher values reduce large device-to-host transfers, but CPU-side collision checks and dashboard metrics see the physical state less often.
+- `gravitygpu.readback.interval` is the older compatibility flag. Prefer `gravitygpu.render.readback.interval` for new runs.
+- `gravitygpu.draw.overlay.cache.frames` controls how many frames `GravityGPU` may reuse the cached JavaFX overlay layer for solar belts and orbit guides before rebuilding it. The default is `2`. Lower values keep overlays more exact while rotating or when optional guide layers are enabled; higher values reduce JavaFX drawing work if those overlays cause draw-time spikes.
+
+When `Show orbits` is enabled in `GravityGPU`, the orbit guides are dynamically recomputed from the current synced position and velocity, so they can change when another body perturbs a planet. This intentionally forces full state and velocity sync at the render readback cadence while orbit guides are visible.
+
+For a stable Solar System without custom bodies, a good starting point is:
+
+```powershell
+$env:EXTRA_JVM_FLAGS = "-Dgravitygpu.render.readback.interval=2 -Dgravitygpu.state.readback.interval=30"
+pwsh -File .\run.ps1 7
+```
+
+When adding custom bodies or testing collisions, reduce the full state interval so CPU-side collision handling observes the simulation more frequently:
+
+```powershell
+$env:EXTRA_JVM_FLAGS = "-Dgravitygpu.render.readback.interval=2 -Dgravitygpu.state.readback.interval=6"
+pwsh -File .\run.ps1 7
+```
+
 If PowerShell blocks local script execution, run it for the current command only:
 
 ```powershell
