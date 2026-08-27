@@ -17,9 +17,7 @@ import javafx.scene.text.Font;
 import javafx.scene.text.TextAlignment;
 import javafx.stage.Screen;
 import javafx.stage.Stage;
-import uk.ac.manchester.tornado.api.TaskGraph;
-import uk.ac.manchester.tornado.api.TornadoExecutionPlan;
-import uk.ac.manchester.tornado.api.TornadoExecutionResult;
+import uk.ac.manchester.tornado.api.*;
 import uk.ac.manchester.tornado.api.common.TornadoDevice;
 import uk.ac.manchester.tornado.api.enums.DataTransferMode;
 import uk.ac.manchester.tornado.api.types.arrays.FloatArray;
@@ -473,9 +471,7 @@ public class GravityGPU extends Application {
         trailsCheckbox.setStyle("-fx-text-fill: #b8e0ff; -fx-font-family: monospace; -fx-font-size: 11px;");
         trailsCheckbox.selectedProperty().addListener((_, _, selected) -> {
             showTrails = selected;
-            if (!selected) {
-                clearAllTrails();
-            }
+            clearAllTrails();
         });
 
         CheckBox habitableZoneCheckbox = new CheckBox("Show habitable zone");

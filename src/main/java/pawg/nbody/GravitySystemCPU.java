@@ -194,7 +194,7 @@ public class GravitySystemCPU extends Application {
         CheckBox trails = optionCheckbox("Show trails", showTrails);
         trails.selectedProperty().addListener((_, _, selected) -> {
             showTrails = selected;
-            if (!selected) clearAllTrails();
+            clearAllTrails();
         });
         CheckBox weak = optionCheckbox("Show weak Sun gravity", showWeakSunGravity);
         weak.selectedProperty().addListener((_, _, selected) -> showWeakSunGravity = selected);
