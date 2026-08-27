@@ -11,6 +11,7 @@ import javafx.scene.input.MouseEvent;
 import javafx.scene.layout.StackPane;
 import javafx.stage.Stage;
 
+import pawg.nbody.TornadoDeviceSelector;
 import uk.ac.manchester.tornado.api.TaskGraph;
 import uk.ac.manchester.tornado.api.TornadoExecutionPlan;
 import uk.ac.manchester.tornado.api.enums.DataTransferMode;
@@ -20,6 +21,7 @@ import java.util.Random;
 
 public class GameOfLifeInteractive extends Application {
 
+    public static final Random RANDOM = new Random();
     private static final int WIDTH = 1200;
     private static final int HEIGHT = 880;
     private static final int SIZE = WIDTH * HEIGHT;
@@ -35,9 +37,10 @@ public class GameOfLifeInteractive extends Application {
 
     @Override
     public void start(Stage primaryStage) {
-        Random rand = new Random();
+        var selectedTornadoDevice = TornadoDeviceSelector.selectDevice(primaryStage);
+
         for (int i = 0; i < SIZE; i++) {
-            gridA[i] = rand.nextFloat() < 0.1 ? 1 : 0;
+            gridA[i] = RANDOM.nextFloat() < 0.1 ? 1 : 0;
         }
 
         // Use DataTransferMode.EVERY_EXECUTION for gridA so mouse changes can be uploaded dynamically while the app runs.
@@ -53,7 +56,7 @@ public class GameOfLifeInteractive extends Application {
                 .task("render", GameOfLifeKernel::renderCells, gridA, pixelBuffer, SIZE, COLOR_ALIVE, COLOR_DEAD)
                 .transferToHost(DataTransferMode.EVERY_EXECUTION, gridA, pixelBuffer);
 
-        executionPlan = new TornadoExecutionPlan(taskGraph.snapshot());
+        executionPlan = TornadoDeviceSelector.applyDevice(new TornadoExecutionPlan(taskGraph.snapshot()), selectedTornadoDevice);
 
         createFxView(primaryStage);
     }

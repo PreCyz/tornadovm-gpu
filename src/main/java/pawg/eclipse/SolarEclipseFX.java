@@ -7,6 +7,7 @@ import javafx.scene.image.*;
 import javafx.scene.layout.StackPane;
 import javafx.scene.paint.Color;
 import javafx.stage.Stage;
+import pawg.nbody.TornadoDeviceSelector;
 import uk.ac.manchester.tornado.api.*;
 import uk.ac.manchester.tornado.api.annotations.Parallel;
 import uk.ac.manchester.tornado.api.enums.DataTransferMode;
@@ -99,6 +100,8 @@ public class SolarEclipseFX extends Application {
 
     @Override
     public void start(Stage primaryStage) {
+        var selectedTornadoDevice = TornadoDeviceSelector.selectDevice(primaryStage);
+
         float radius = 90.0f;
         float sunX = WIDTH / 2.0f;
         float sunY = HEIGHT / 2.0f;
@@ -119,16 +122,14 @@ public class SolarEclipseFX extends Application {
                 .transferToHost(DataTransferMode.EVERY_EXECUTION, pixelBuffer);
 
         ImmutableTaskGraph immutableTaskGraph = taskGraph.snapshot();
-        executionPlan = new TornadoExecutionPlan(immutableTaskGraph);
+        executionPlan = TornadoDeviceSelector.applyDevice(new TornadoExecutionPlan(immutableTaskGraph), selectedTornadoDevice);
 
         WritableImage writableImage = new WritableImage(WIDTH, HEIGHT);
         pixelWriter = writableImage.getPixelWriter();
         ImageView imageView = new ImageView(writableImage);
 
         // Reset handling on mouse click.
-        imageView.setOnMouseClicked(_ -> {
-            startTime = System.nanoTime(); // Reset the start time.
-        });
+        imageView.setOnMouseClicked(_ -> startTime = System.nanoTime()); // Reset the start time.
 
         StackPane root = new StackPane(imageView);
         Scene scene = new Scene(root, WIDTH, HEIGHT, Color.BLACK);

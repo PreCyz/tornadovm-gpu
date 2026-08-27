@@ -17,6 +17,7 @@ import javafx.stage.Screen;
 import javafx.stage.Stage;
 import uk.ac.manchester.tornado.api.TaskGraph;
 import uk.ac.manchester.tornado.api.TornadoExecutionPlan;
+import uk.ac.manchester.tornado.api.common.TornadoDevice;
 import uk.ac.manchester.tornado.api.enums.DataTransferMode;
 import uk.ac.manchester.tornado.api.types.arrays.FloatArray;
 import uk.ac.manchester.tornado.api.types.arrays.IntArray;
@@ -109,6 +110,18 @@ public class GravityGPU extends Application {
     private final FloatArray dashboardAcceleration = new FloatArray(MAX_BODIES);
     private final FloatArray dashboardNearestDistance = new FloatArray(MAX_BODIES);
     private final FloatArray dashboardMetrics = new FloatArray(MAX_BODIES * DASHBOARD_METRIC_STRIDE);
+    private final float[] dashboardPreviousPosX = new float[MAX_BODIES];
+    private final float[] dashboardPreviousPosY = new float[MAX_BODIES];
+    private final float[] dashboardPreviousPosZ = new float[MAX_BODIES];
+    private final float[] dashboardEstimatedVelX = new float[MAX_BODIES];
+    private final float[] dashboardEstimatedVelY = new float[MAX_BODIES];
+    private final float[] dashboardEstimatedVelZ = new float[MAX_BODIES];
+    private final float[] dashboardPreviousVelX = new float[MAX_BODIES];
+    private final float[] dashboardPreviousVelY = new float[MAX_BODIES];
+    private final float[] dashboardPreviousVelZ = new float[MAX_BODIES];
+    private final float[] dashboardEstimatedAccX = new float[MAX_BODIES];
+    private final float[] dashboardEstimatedAccY = new float[MAX_BODIES];
+    private final float[] dashboardEstimatedAccZ = new float[MAX_BODIES];
     private final FloatArray trailX = new FloatArray(MAX_BODIES * TRAIL_CAPACITY);
     private final FloatArray trailY = new FloatArray(MAX_BODIES * TRAIL_CAPACITY);
     private final FloatArray trailZ = new FloatArray(MAX_BODIES * TRAIL_CAPACITY);
@@ -149,6 +162,9 @@ public class GravityGPU extends Application {
 
     private TornadoExecutionPlan executionPlan;
     private TornadoExecutionPlan trailProjectionPlan;
+    private TornadoDevice selectedTornadoDevice;
+    private boolean simulationPlanDirty = false;
+    private boolean simulationPlanReady = false;
 
     private int customBodyCount = 0;
     private boolean showHabitableZone = false;
@@ -182,6 +198,7 @@ public class GravityGPU extends Application {
     private long simulationStartNanos = -1L;
     private long displayedElapsedSeconds = -1L;
     private int projectedBodyCount = 0;
+    private int framesSinceDashboardMetrics = 0;
 
     private record ScreenPoint(float x, float y, float depthScale) {
     }
@@ -198,9 +215,9 @@ public class GravityGPU extends Application {
         private long maxSimulationNanos;
         private long maxDrawNanos;
 
-        void record(int frameNumber, long uiNanos, long trailAppendNanos, long simulationNanos,
-                    long collisionNanos, long projectionNanos, long trailProjectionNanos,
-                    long dashboardNanos, long drawNanos, long frameNanos) {
+        void recordLog(int frameNumber, long uiNanos, long trailAppendNanos, long simulationNanos,
+                       long collisionNanos, long projectionNanos, long trailProjectionNanos,
+                       long dashboardNanos, long drawNanos, long frameNanos) {
             if (!FRAME_TIMING_ENABLED) {
                 return;
             }
@@ -293,6 +310,7 @@ public class GravityGPU extends Application {
         dashboardParams.set(2, accelerationToMetersPerSecondSquared(1.0f));
 
         resetSystem();
+        chooseTornadoDevice(primaryStage);
         initTornadoPlanOnce();
         warmUpTornadoPlans();
 
@@ -450,7 +468,9 @@ public class GravityGPU extends Application {
                 stageStartNanos = System.nanoTime();
                 updateSimulationState();
                 updateRenderParams();
+                rebuildSimulationPlanIfDirty();
                 executionPlan.execute();
+                framesSinceDashboardMetrics++;
                 long simulationNanos = System.nanoTime() - stageStartNanos;
 
                 stageStartNanos = System.nanoTime();
@@ -520,7 +540,7 @@ public class GravityGPU extends Application {
 
                 drawAxisIndicator(gc);
                 long drawNanos = System.nanoTime() - stageStartNanos;
-                frameTiming.record(
+                frameTiming.recordLog(
                         frameCounter,
                         uiNanos,
                         trailAppendNanos,
@@ -707,9 +727,9 @@ public class GravityGPU extends Application {
         double rx = posX.get(bodyIndex) - posX.get(sunIndex);
         double ry = posY.get(bodyIndex) - posY.get(sunIndex);
         double rz = posZ.get(bodyIndex) - posZ.get(sunIndex);
-        double vx = velX.get(bodyIndex) - velX.get(sunIndex);
-        double vy = velY.get(bodyIndex) - velY.get(sunIndex);
-        double vz = velZ.get(bodyIndex) - velZ.get(sunIndex);
+        double vx = dashboardEstimatedVelX[bodyIndex] - dashboardEstimatedVelX[sunIndex];
+        double vy = dashboardEstimatedVelY[bodyIndex] - dashboardEstimatedVelY[sunIndex];
+        double vz = dashboardEstimatedVelZ[bodyIndex] - dashboardEstimatedVelZ[sunIndex];
         double mu = G * (mass.get(sunIndex) + mass.get(bodyIndex));
 
         double rMagnitude = Math.sqrt(rx * rx + ry * ry + rz * rz);
@@ -1112,12 +1132,36 @@ public class GravityGPU extends Application {
                 continue;
             }
 
-            float vxi = velX.get(i);
-            float vyi = velY.get(i);
-            float vzi = velZ.get(i);
-            float axi = accX.get(i);
-            float ayi = accY.get(i);
-            float azi = accZ.get(i);
+            float pxi = posX.get(i);
+            float pyi = posY.get(i);
+            float pzi = posZ.get(i);
+            float vxi = dashboardEstimatedVelX[i];
+            float vyi = dashboardEstimatedVelY[i];
+            float vzi = dashboardEstimatedVelZ[i];
+            float axi = dashboardEstimatedAccX[i];
+            float ayi = dashboardEstimatedAccY[i];
+            float azi = dashboardEstimatedAccZ[i];
+            if (framesSinceDashboardMetrics > 0) {
+                float elapsedSimulationTime = framesSinceDashboardMetrics * GPU_SUB_STEPS * DT;
+                vxi = (pxi - dashboardPreviousPosX[i]) / elapsedSimulationTime;
+                vyi = (pyi - dashboardPreviousPosY[i]) / elapsedSimulationTime;
+                vzi = (pzi - dashboardPreviousPosZ[i]) / elapsedSimulationTime;
+                axi = (vxi - dashboardPreviousVelX[i]) / elapsedSimulationTime;
+                ayi = (vyi - dashboardPreviousVelY[i]) / elapsedSimulationTime;
+                azi = (vzi - dashboardPreviousVelZ[i]) / elapsedSimulationTime;
+                dashboardEstimatedVelX[i] = vxi;
+                dashboardEstimatedVelY[i] = vyi;
+                dashboardEstimatedVelZ[i] = vzi;
+                dashboardEstimatedAccX[i] = axi;
+                dashboardEstimatedAccY[i] = ayi;
+                dashboardEstimatedAccZ[i] = azi;
+                dashboardPreviousPosX[i] = pxi;
+                dashboardPreviousPosY[i] = pyi;
+                dashboardPreviousPosZ[i] = pzi;
+                dashboardPreviousVelX[i] = vxi;
+                dashboardPreviousVelY[i] = vyi;
+                dashboardPreviousVelZ[i] = vzi;
+            }
 
             dashboardSpeed.set(i, vectorLength(vxi, vyi, vzi) * velocityConversion);
             dashboardAcceleration.set(i, vectorLength(axi, ayi, azi) * accelerationConversion);
@@ -1128,9 +1172,6 @@ public class GravityGPU extends Application {
             setDashboardMetric(i, DASHBOARD_ACCELERATION_Y_METERS_PER_SECOND_SQUARED, ayi * accelerationConversion);
             setDashboardMetric(i, DASHBOARD_ACCELERATION_Z_METERS_PER_SECOND_SQUARED, azi * accelerationConversion);
 
-            float pxi = posX.get(i);
-            float pyi = posY.get(i);
-            float pzi = posZ.get(i);
             if (i != 0) {
                 setDashboardMetric(i, DASHBOARD_DISTANCE_FROM_SUN_AU,
                         vectorLength(pxi - sunX, pyi - sunY, pzi - sunZ) / PHYSICS_UNITS_PER_AU);
@@ -1158,6 +1199,49 @@ public class GravityGPU extends Application {
                 dashboardNearestDistance.set(i, (float) Math.sqrt(closestDistanceSq));
             }
         }
+        framesSinceDashboardMetrics = 0;
+    }
+
+    private void resetDashboardMotionEstimate(int i) {
+        dashboardPreviousPosX[i] = posX.get(i);
+        dashboardPreviousPosY[i] = posY.get(i);
+        dashboardPreviousPosZ[i] = posZ.get(i);
+        dashboardEstimatedVelX[i] = velX.get(i);
+        dashboardEstimatedVelY[i] = velY.get(i);
+        dashboardEstimatedVelZ[i] = velZ.get(i);
+        dashboardPreviousVelX[i] = dashboardEstimatedVelX[i];
+        dashboardPreviousVelY[i] = dashboardEstimatedVelY[i];
+        dashboardPreviousVelZ[i] = dashboardEstimatedVelZ[i];
+        dashboardEstimatedAccX[i] = 0.0f;
+        dashboardEstimatedAccY[i] = 0.0f;
+        dashboardEstimatedAccZ[i] = 0.0f;
+    }
+
+    private void resetDashboardPositionBaseline(int i) {
+        dashboardPreviousPosX[i] = posX.get(i);
+        dashboardPreviousPosY[i] = posY.get(i);
+        dashboardPreviousPosZ[i] = posZ.get(i);
+        dashboardPreviousVelX[i] = dashboardEstimatedVelX[i];
+        dashboardPreviousVelY[i] = dashboardEstimatedVelY[i];
+        dashboardPreviousVelZ[i] = dashboardEstimatedVelZ[i];
+        dashboardEstimatedAccX[i] = 0.0f;
+        dashboardEstimatedAccY[i] = 0.0f;
+        dashboardEstimatedAccZ[i] = 0.0f;
+    }
+
+    private void clearDashboardMotionEstimate(int i) {
+        dashboardPreviousPosX[i] = 0.0f;
+        dashboardPreviousPosY[i] = 0.0f;
+        dashboardPreviousPosZ[i] = 0.0f;
+        dashboardEstimatedVelX[i] = 0.0f;
+        dashboardEstimatedVelY[i] = 0.0f;
+        dashboardEstimatedVelZ[i] = 0.0f;
+        dashboardPreviousVelX[i] = 0.0f;
+        dashboardPreviousVelY[i] = 0.0f;
+        dashboardPreviousVelZ[i] = 0.0f;
+        dashboardEstimatedAccX[i] = 0.0f;
+        dashboardEstimatedAccY[i] = 0.0f;
+        dashboardEstimatedAccZ[i] = 0.0f;
     }
 
     private void projectBodiesOnCpu() {
@@ -1279,19 +1363,23 @@ public class GravityGPU extends Application {
     }
 
     private void initTornadoPlanOnce() {
+        closeExecutionPlan();
+
         TaskGraph taskGraph = new TaskGraph("nbody")
-                .transferToDevice(DataTransferMode.EVERY_EXECUTION,
-                        posX, posY, posZ, velX, velY, velZ, mass, activeState, physParams, simulationState)
                 .transferToDevice(DataTransferMode.FIRST_EXECUTION,
-                        accX, accY, accZ, nextAccX, nextAccY, nextAccZ)
+                        posX, posY, posZ, velX, velY, velZ,
+                        accX, accY, accZ, nextAccX, nextAccY, nextAccZ,
+                        mass, activeState, physParams, simulationState)
                 .task("simulateFrame", PhysicsKernels::simulateVerletFrame,
                         posX, posY, posZ, velX, velY, velZ,
                         accX, accY, accZ, nextAccX, nextAccY, nextAccZ,
                         mass, activeState, physParams, simulationState, GPU_SUB_STEPS)
                 .transferToHost(DataTransferMode.EVERY_EXECUTION,
-                        posX, posY, posZ, velX, velY, velZ, accX, accY, accZ);
+                        posX, posY, posZ);
 
-        executionPlan = new TornadoExecutionPlan(taskGraph.snapshot());
+        executionPlan = applySelectedTornadoDevice(new TornadoExecutionPlan(taskGraph.snapshot()));
+        simulationPlanReady = true;
+        simulationPlanDirty = false;
 
         TaskGraph trailTaskGraph = new TaskGraph("trailProjection")
                 .transferToDevice(DataTransferMode.EVERY_EXECUTION,
@@ -1302,7 +1390,15 @@ public class GravityGPU extends Application {
                         projectedTrailX, projectedTrailY, simulationState)
                 .transferToHost(DataTransferMode.EVERY_EXECUTION, projectedTrailX, projectedTrailY);
 
-        trailProjectionPlan = new TornadoExecutionPlan(trailTaskGraph.snapshot());
+        trailProjectionPlan = applySelectedTornadoDevice(new TornadoExecutionPlan(trailTaskGraph.snapshot()));
+    }
+
+    private void chooseTornadoDevice(Stage owner) {
+        selectedTornadoDevice = TornadoDeviceSelector.selectDevice(owner);
+    }
+
+    private TornadoExecutionPlan applySelectedTornadoDevice(TornadoExecutionPlan plan) {
+        return TornadoDeviceSelector.applyDevice(plan, selectedTornadoDevice);
     }
 
     private void warmUpTornadoPlans() {
@@ -1319,6 +1415,40 @@ public class GravityGPU extends Application {
         projectedTrailYaw = Float.NaN;
         projectedTrailPitch = Float.NaN;
         trailsNeedProjection = false;
+    }
+
+    private void rebuildSimulationPlanIfDirty() {
+        if (simulationPlanDirty || !simulationPlanReady) {
+            initTornadoPlanOnce();
+            updateSimulationState();
+            updateRenderParams();
+        }
+    }
+
+    private void markSimulationPlanDirty() {
+        if (simulationPlanReady) {
+            simulationPlanDirty = true;
+        }
+    }
+
+    private void closeExecutionPlan() {
+        if (executionPlan != null) {
+            try {
+                executionPlan.close();
+            } catch (Exception _) {
+                // Rebuilding the plan is best effort; stale device memory can be reclaimed by TornadoVM.
+            }
+            executionPlan = null;
+        }
+        if (trailProjectionPlan != null) {
+            try {
+                trailProjectionPlan.close();
+            } catch (Exception _) {
+                // Rebuilding the plan is best effort; stale device memory can be reclaimed by TornadoVM.
+            }
+            trailProjectionPlan = null;
+        }
+        simulationPlanReady = false;
     }
 
     private void updateElapsedTime(long now) {
@@ -1379,6 +1509,7 @@ public class GravityGPU extends Application {
 
         if (mergedAny) {
             compactBodies();
+            markSimulationPlanDirty();
         }
     }
 
@@ -1394,9 +1525,9 @@ public class GravityGPU extends Application {
         float mergedX = (posX.get(firstIndex) * firstMass + posX.get(secondIndex) * secondMass) / mergedMass;
         float mergedY = (posY.get(firstIndex) * firstMass + posY.get(secondIndex) * secondMass) / mergedMass;
         float mergedZ = (posZ.get(firstIndex) * firstMass + posZ.get(secondIndex) * secondMass) / mergedMass;
-        float mergedVx = (velX.get(firstIndex) * firstMass + velX.get(secondIndex) * secondMass) / mergedMass;
-        float mergedVy = (velY.get(firstIndex) * firstMass + velY.get(secondIndex) * secondMass) / mergedMass;
-        float mergedVz = (velZ.get(firstIndex) * firstMass + velZ.get(secondIndex) * secondMass) / mergedMass;
+        float mergedVx = (dashboardEstimatedVelX[firstIndex] * firstMass + dashboardEstimatedVelX[secondIndex] * secondMass) / mergedMass;
+        float mergedVy = (dashboardEstimatedVelY[firstIndex] * firstMass + dashboardEstimatedVelY[secondIndex] * secondMass) / mergedMass;
+        float mergedVz = (dashboardEstimatedVelZ[firstIndex] * firstMass + dashboardEstimatedVelZ[secondIndex] * secondMass) / mergedMass;
 
         boolean keepFirst = firstMass >= secondMass;
         int survivor = keepFirst ? firstIndex : secondIndex;
@@ -1419,6 +1550,7 @@ public class GravityGPU extends Application {
         dashboardSpeed.set(survivor, (float) Math.sqrt(mergedVx * mergedVx + mergedVy * mergedVy + mergedVz * mergedVz));
         dashboardAcceleration.set(survivor, 0.0f);
         dashboardNearestDistance.set(survivor, 0.0f);
+        resetDashboardMotionEstimate(survivor);
         clearDashboardMetrics(survivor);
         dashboardNearestIndex.set(survivor, -1);
         bodyNames[survivor] = bodyNames[survivor] + "+";
@@ -1469,6 +1601,18 @@ public class GravityGPU extends Application {
             setDashboardMetric(target, metricOffset, dashboardMetric(source, metricOffset));
         }
         dashboardNearestIndex.set(target, dashboardNearestIndex.get(source));
+        dashboardPreviousPosX[target] = dashboardPreviousPosX[source];
+        dashboardPreviousPosY[target] = dashboardPreviousPosY[source];
+        dashboardPreviousPosZ[target] = dashboardPreviousPosZ[source];
+        dashboardEstimatedVelX[target] = dashboardEstimatedVelX[source];
+        dashboardEstimatedVelY[target] = dashboardEstimatedVelY[source];
+        dashboardEstimatedVelZ[target] = dashboardEstimatedVelZ[source];
+        dashboardPreviousVelX[target] = dashboardPreviousVelX[source];
+        dashboardPreviousVelY[target] = dashboardPreviousVelY[source];
+        dashboardPreviousVelZ[target] = dashboardPreviousVelZ[source];
+        dashboardEstimatedAccX[target] = dashboardEstimatedAccX[source];
+        dashboardEstimatedAccY[target] = dashboardEstimatedAccY[source];
+        dashboardEstimatedAccZ[target] = dashboardEstimatedAccZ[source];
         projectedScreenX.set(target, projectedScreenX.get(source));
         projectedScreenY.set(target, projectedScreenY.get(source));
         projectedDepthScale.set(target, projectedDepthScale.get(source));
@@ -1518,6 +1662,7 @@ public class GravityGPU extends Application {
         dashboardSpeed.set(i, 0.0f);
         dashboardAcceleration.set(i, 0.0f);
         dashboardNearestDistance.set(i, 0.0f);
+        clearDashboardMotionEstimate(i);
         clearDashboardMetrics(i);
         dashboardNearestIndex.set(i, -1);
         projectedScreenX.set(i, 0.0f);
@@ -1667,9 +1812,11 @@ public class GravityGPU extends Application {
             posX.set(i, newX);
             posY.set(i, newY);
             posZ.set(i, newZ);
+            resetDashboardPositionBaseline(i);
+            markSimulationPlanDirty();
             clearTrail(i);
             updateEditableFields(i);
-        } catch (NumberFormatException e) {
+        } catch (NumberFormatException _) {
             updateEditableFields(i);
         }
     }
@@ -1684,8 +1831,9 @@ public class GravityGPU extends Application {
             float newMass = Math.max(0.0f, parseField(massField));
             mass.set(i, newMass);
             radius.set(i, radiusForCreatedMass(newMass));
+            markSimulationPlanDirty();
             updateEditableFields(i);
-        } catch (NumberFormatException e) {
+        } catch (NumberFormatException _) {
             updateEditableFields(i);
         }
     }
@@ -1698,8 +1846,10 @@ public class GravityGPU extends Application {
             velX.set(i, kilometersPerSecondToSimulationSpeed(parseField(velocityXFields[i])));
             velY.set(i, kilometersPerSecondToSimulationSpeed(parseField(velocityYFields[i])));
             velZ.set(i, kilometersPerSecondToSimulationSpeed(parseField(velocityZFields[i])));
+            resetDashboardMotionEstimate(i);
+            markSimulationPlanDirty();
             updateEditableFields(i);
-        } catch (NumberFormatException e) {
+        } catch (NumberFormatException _) {
             updateEditableFields(i);
         }
     }
@@ -1823,6 +1973,7 @@ public class GravityGPU extends Application {
             nextAccX.set(i, 0.0f);
             nextAccY.set(i, 0.0f);
             nextAccZ.set(i, 0.0f);
+            clearDashboardMotionEstimate(i);
             editableMass[i] = false;
             orbitSemiMajorAu[i] = 0.0f;
             orbitEccentricity[i] = 0.0f;
@@ -1866,6 +2017,11 @@ public class GravityGPU extends Application {
         velX.set(0, -totalPx / mass.get(0));
         velY.set(0, -totalPy / mass.get(0));
         velZ.set(0, -totalPz / mass.get(0));
+        for (int i = 0; i < bodyCount; i++) {
+            resetDashboardMotionEstimate(i);
+        }
+        framesSinceDashboardMetrics = 0;
+        markSimulationPlanDirty();
     }
 
     private float[] resetOrbitAngles() {
@@ -1928,6 +2084,7 @@ public class GravityGPU extends Application {
         float y = spawnPosition[1];
         float z = spawnPosition[2];
         addBody(String.format("Body #%d", customBodyCount), x, y, z, 0.0f, 0.0f, 0.0f, 0.0f, 3.0f, Color.RED, true);
+        markSimulationPlanDirty();
         computeDashboardMetricsOnCpu();
         updateDashboard();
     }
@@ -1969,6 +2126,7 @@ public class GravityGPU extends Application {
         orbitSemiMajorAu[i] = 0.0f;
         orbitEccentricity[i] = 0.0f;
         activeState.set(i, 1);
+        resetDashboardMotionEstimate(i);
 
         bodyCount++;
     }

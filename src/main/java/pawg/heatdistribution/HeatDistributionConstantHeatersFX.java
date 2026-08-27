@@ -9,6 +9,7 @@ import javafx.scene.layout.StackPane;
 import javafx.scene.paint.Color;
 import javafx.stage.Stage;
 
+import pawg.nbody.TornadoDeviceSelector;
 import uk.ac.manchester.tornado.api.TaskGraph;
 import uk.ac.manchester.tornado.api.TornadoExecutionPlan;
 import uk.ac.manchester.tornado.api.annotations.Parallel;
@@ -101,6 +102,8 @@ public class HeatDistributionConstantHeatersFX extends Application {
 
     @Override
     public void start(Stage primaryStage) {
+        var selectedTornadoDevice = TornadoDeviceSelector.selectDevice(primaryStage);
+
         // 1. Place one permanent heater in the center by default.
         addPermanentSource(DIM / 2, DIM / 2, 20);
 
@@ -110,14 +113,14 @@ public class HeatDistributionConstantHeatersFX extends Application {
                 .task("taskAtoB", HeatDistributionConstantHeatersFX::computeHeatStep, gridA, gridB, heatSourcesMask, DIM, ALPHA)
                 .task("renderB", HeatDistributionConstantHeatersFX::renderHeatPixels, gridB, pixelBuffer, DIM * DIM)
                 .transferToHost(DataTransferMode.EVERY_EXECUTION, gridB, pixelBuffer);
-        planAtoB = new TornadoExecutionPlan(tgAtoB.snapshot());
+        planAtoB = TornadoDeviceSelector.applyDevice(new TornadoExecutionPlan(tgAtoB.snapshot()), selectedTornadoDevice);
 
         TaskGraph tgBtoA = new TaskGraph("tgBtoA")
                 .transferToDevice(DataTransferMode.EVERY_EXECUTION, gridB, heatSourcesMask)
                 .task("taskBtoA", HeatDistributionConstantHeatersFX::computeHeatStep, gridB, gridA, heatSourcesMask, DIM, ALPHA)
                 .task("renderA", HeatDistributionConstantHeatersFX::renderHeatPixels, gridA, pixelBuffer, DIM * DIM)
                 .transferToHost(DataTransferMode.EVERY_EXECUTION, gridA, pixelBuffer);
-        planBtoA = new TornadoExecutionPlan(tgBtoA.snapshot());
+        planBtoA = TornadoDeviceSelector.applyDevice(new TornadoExecutionPlan(tgBtoA.snapshot()), selectedTornadoDevice);
 
         WritableImage writableImage = new WritableImage(DIM, DIM);
         pixelWriter = writableImage.getPixelWriter();

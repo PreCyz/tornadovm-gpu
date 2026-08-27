@@ -9,6 +9,7 @@ import javafx.scene.layout.StackPane;
 import javafx.scene.paint.Color;
 import javafx.stage.Screen;
 import javafx.stage.Stage;
+import pawg.nbody.TornadoDeviceSelector;
 import uk.ac.manchester.tornado.api.*;
 import uk.ac.manchester.tornado.api.annotations.Parallel;
 import uk.ac.manchester.tornado.api.enums.DataTransferMode;
@@ -21,8 +22,6 @@ public class EarthOrbitGPU extends Application {
 
     // Earth orbit radius around the Sun.
     private static final float ORBIT_RADIUS = 260.0f;
-//    private static final float SUN_RADIUS = 45.0f;
-//    private static final float EARTH_RADIUS = 16.0f;
 
     private final int[] pixelBuffer = new int[WIDTH * HEIGHT];
     // [sunX, sunY, earthX, earthY, earthAngle]
@@ -107,6 +106,8 @@ public class EarthOrbitGPU extends Application {
 
     @Override
     public void start(Stage primaryStage) {
+        var selectedTornadoDevice = TornadoDeviceSelector.selectDevice(primaryStage);
+
         float sunX = WIDTH / 2.0f;
         float sunY = HEIGHT / 2.0f;
 
@@ -119,7 +120,7 @@ public class EarthOrbitGPU extends Application {
                 .transferToHost(DataTransferMode.EVERY_EXECUTION, pixelBuffer);
 
         ImmutableTaskGraph immutableTaskGraph = taskGraph.snapshot();
-        executionPlan = new TornadoExecutionPlan(immutableTaskGraph);
+        executionPlan = TornadoDeviceSelector.applyDevice(new TornadoExecutionPlan(immutableTaskGraph), selectedTornadoDevice);
 
         WritableImage writableImage = new WritableImage(WIDTH, HEIGHT);
         pixelWriter = writableImage.getPixelWriter();

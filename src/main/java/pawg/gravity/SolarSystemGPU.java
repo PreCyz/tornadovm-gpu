@@ -9,6 +9,7 @@ import javafx.scene.layout.StackPane;
 import javafx.scene.paint.Color;
 import javafx.stage.Screen;
 import javafx.stage.Stage;
+import pawg.nbody.TornadoDeviceSelector;
 import uk.ac.manchester.tornado.api.*;
 import uk.ac.manchester.tornado.api.annotations.Parallel;
 import uk.ac.manchester.tornado.api.enums.DataTransferMode;
@@ -194,6 +195,8 @@ public class SolarSystemGPU extends Application {
 
     @Override
     public void start(Stage primaryStage) {
+        var selectedTornadoDevice = TornadoDeviceSelector.selectDevice(primaryStage);
+
         float sunX = WIDTH / 2.0f;
         float sunY = HEIGHT / 2.0f;
 
@@ -206,7 +209,7 @@ public class SolarSystemGPU extends Application {
                 .transferToHost(DataTransferMode.EVERY_EXECUTION, pixelBuffer);
 
         ImmutableTaskGraph immutableTaskGraph = taskGraph.snapshot();
-        executionPlan = new TornadoExecutionPlan(immutableTaskGraph);
+        executionPlan = TornadoDeviceSelector.applyDevice(new TornadoExecutionPlan(immutableTaskGraph), selectedTornadoDevice);
 
         WritableImage writableImage = new WritableImage(WIDTH, HEIGHT);
         pixelWriter = writableImage.getPixelWriter();

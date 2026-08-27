@@ -8,6 +8,7 @@ import javafx.scene.input.MouseEvent;
 import javafx.scene.layout.StackPane;
 import javafx.scene.paint.Color;
 import javafx.stage.Stage;
+import pawg.nbody.TornadoDeviceSelector;
 import uk.ac.manchester.tornado.api.TaskGraph;
 import uk.ac.manchester.tornado.api.TornadoExecutionPlan;
 import uk.ac.manchester.tornado.api.annotations.Parallel;
@@ -92,6 +93,8 @@ public class HeatDistributionFX extends Application {
 
     @Override
     public void start(Stage primaryStage) {
+        var selectedTornadoDevice = TornadoDeviceSelector.selectDevice(primaryStage);
+
         initHeatSources();
 
         // Create two separate execution plans for buffer swapping (A->B and B->A).
@@ -100,14 +103,14 @@ public class HeatDistributionFX extends Application {
                 .task("taskAtoB", HeatDistributionFX::computeHeatStep, gridA, gridB, DIM, ALPHA)
                 .task("renderB", HeatDistributionFX::renderHeatPixels, gridB, pixelBuffer, DIM * DIM)
                 .transferToHost(DataTransferMode.EVERY_EXECUTION, gridB, pixelBuffer);
-        planAtoB = new TornadoExecutionPlan(tgAtoB.snapshot());
+        planAtoB = TornadoDeviceSelector.applyDevice(new TornadoExecutionPlan(tgAtoB.snapshot()), selectedTornadoDevice);
 
         TaskGraph tgBtoA = new TaskGraph("tgBtoA")
                 .transferToDevice(DataTransferMode.EVERY_EXECUTION, gridB)
                 .task("taskBtoA", HeatDistributionFX::computeHeatStep, gridB, gridA, DIM, ALPHA)
                 .task("renderA", HeatDistributionFX::renderHeatPixels, gridA, pixelBuffer, DIM * DIM)
                 .transferToHost(DataTransferMode.EVERY_EXECUTION, gridA, pixelBuffer);
-        planBtoA = new TornadoExecutionPlan(tgBtoA.snapshot());
+        planBtoA = TornadoDeviceSelector.applyDevice(new TornadoExecutionPlan(tgBtoA.snapshot()), selectedTornadoDevice);
 
         WritableImage writableImage = new WritableImage(DIM, DIM);
         pixelWriter = writableImage.getPixelWriter();
