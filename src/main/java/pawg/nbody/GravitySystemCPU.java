@@ -123,7 +123,7 @@ public class GravitySystemCPU extends Application {
         });
         canvas.setOnMouseDragged(event -> {
             cameraYaw = dragStartYaw + (float) ((event.getX() - dragStartX) * 0.006);
-            cameraPitch = clamp(dragStartPitch - (float) ((event.getY() - dragStartY) * 0.006), -1.35f, 1.35f);
+            cameraPitch = Math.clamp(dragStartPitch - (float) ((event.getY() - dragStartY) * 0.006), -1.35f, 1.35f);
             projectBodies();
             if (showTrails) projectTrails();
         });
@@ -356,7 +356,7 @@ public class GravitySystemCPU extends Application {
         float yawZ = -x * sinYaw + z * cosYaw;
         float viewY = y * cosPitch - yawZ * sinPitch;
         float viewZ = y * sinPitch + yawZ * cosPitch;
-        float scale = clamp(1.0f + viewZ * 0.25f, 0.65f, 1.35f);
+        float scale = Math.clamp(1.0f + viewZ * 0.25f, 0.65f, 1.35f);
         return new ScreenPoint((float) (yawX * length * scale), (float) (-viewY * length * scale), scale);
     }
 
@@ -511,7 +511,7 @@ public class GravitySystemCPU extends Application {
         float verticalRadius = Math.max(60.0f, Math.min(sunScreenY - padding, (float) canvasHeight - sunScreenY - padding));
         float maximumCenteredRadius = Math.min(horizontalRadius, verticalRadius);
         float fallbackRadius = (float) Math.min(canvasWidth, canvasHeight) * 0.43f;
-        return clamp(Math.min(maximumCenteredRadius, fallbackRadius), 60.0f, fallbackRadius);
+        return Math.clamp(Math.min(maximumCenteredRadius, fallbackRadius), 60.0f, fallbackRadius);
     }
 
     private void drawPlanetRings(GraphicsContext gc, int bodyIndex, float screenX, float screenY, float depthScale) {
@@ -787,7 +787,7 @@ public class GravitySystemCPU extends Application {
 
     private void addKeplerPlanet(String name, float au, float eccentricity, float planetMass, float size, Color color, float trueAnomaly) {
         float semiMajor = physicalRadiusForAu(au);
-        float e = clamp(eccentricity, 0, 0.95f);
+        float e = Math.clamp(eccentricity, 0, 0.95f);
         float p = semiMajor * (1.0f - e * e);
         float r = p / (1.0f + e * (float) Math.cos(trueAnomaly));
         float mu = G * (SUN_MASS + planetMass);
@@ -961,7 +961,7 @@ public class GravitySystemCPU extends Application {
         float viewY = physicsY * cosPitch - yawZ * sinPitch;
         float viewZ = physicsY * sinPitch + yawZ * cosPitch;
         float physicsDistance = length(physicsX, physicsY, physicsZ);
-        float scale = clamp(1.0f + viewZ / DEPTH_SCALE_DENOMINATOR, 0.55f, 1.45f);
+        float scale = Math.clamp(1.0f + viewZ / DEPTH_SCALE_DENOMINATOR, 0.55f, 1.45f);
         if (physicsDistance <= 0.000001f) return new ScreenPoint((float) canvasWidth * 0.5f, (float) canvasHeight * 0.5f, scale);
         float projectedDistance = length(viewX, viewY, 0);
         if (projectedDistance <= 0.000001f) return new ScreenPoint((float) canvasWidth * 0.5f, (float) canvasHeight * 0.5f, scale);
@@ -1021,7 +1021,7 @@ public class GravitySystemCPU extends Application {
     private float physicsRadiusForScreenDistance(float screenDistance) {
         if (screenDistance <= MIN_PLANET_ORBIT_RADIUS) return physicalRadiusForAu(MERCURY_AU) * screenDistance / MIN_PLANET_ORBIT_RADIUS;
         float maxOrbitRadius = Math.max(MIN_PLANET_ORBIT_RADIUS + 1.0f, (float) Math.min(canvasWidth, canvasHeight) * 0.5f - ORBIT_EDGE_PADDING);
-        float normalized = clamp((screenDistance - MIN_PLANET_ORBIT_RADIUS) / (maxOrbitRadius - MIN_PLANET_ORBIT_RADIUS), 0, 1);
+        float normalized = Math.clamp((screenDistance - MIN_PLANET_ORBIT_RADIUS) / (maxOrbitRadius - MIN_PLANET_ORBIT_RADIUS), 0, 1);
         float minLog = (float) Math.log(MERCURY_AU), maxLog = (float) Math.log(NEPTUNE_AU);
         return physicalRadiusForAu((float) Math.exp(minLog + normalized * (maxLog - minLog)));
     }
@@ -1062,15 +1062,11 @@ public class GravitySystemCPU extends Application {
     }
 
     private float radiusForCreatedMass(float bodyMass) {
-        return clamp(3.0f + (float) Math.pow(Math.max(0.0f, bodyMass), 1.0 / 3.0) * 1.5f, 3.0f, MAX_CREATED_BODY_RADIUS);
+        return Math.clamp(3.0f + (float) Math.pow(Math.max(0.0f, bodyMass), 1.0 / 3.0) * 1.5f, 3.0f, MAX_CREATED_BODY_RADIUS);
     }
 
     private float length(float x, float y, float z) {
         return (float) Math.sqrt(x * x + y * y + z * z);
-    }
-
-    private float clamp(float value, float min, float max) {
-        return Math.max(min, Math.min(max, value));
     }
 
     private String toHex(Color color) {

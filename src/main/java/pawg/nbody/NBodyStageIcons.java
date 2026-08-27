@@ -71,7 +71,7 @@ final class NBodyStageIcons {
                 if (normalizedDistance <= 1.0) {
                     Color current = reader.getColor(x, y);
                     if (current.getOpacity() > 0.0) {
-                        double edge = Math.max(0.0, Math.min(1.0, normalizedDistance));
+                        double edge = Math.clamp(normalizedDistance, 0.0, 1.0);
                         Color spot = Color.rgb(178, 76, 45).interpolate(Color.rgb(238, 154, 108), edge * 0.35);
                         writer.setColor(x, y, current.interpolate(spot, 0.82));
                     }
