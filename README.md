@@ -56,6 +56,7 @@ The eclipse animation accepts a duration in seconds and a maximum coverage perce
 - JDK 25
 - Maven
 - JavaFX 25
+- ControlsFX 11.2.4
 - TornadoVM 5.2.0 for JDK 25
 - `TORNADOVM_HOME` set to a valid TornadoVM installation
 
@@ -111,31 +112,78 @@ Run the GPU n-body gravity simulator:
 pwsh -File .\run.ps1 7
 ```
 
-Tune `GravityGPU` readback pacing with JVM system properties. These flags are useful when the simulation itself is fast on the GPU, but TornadoVM/OpenCL host synchronization causes visible pauses:
+### TornadoVM Device Selection
+
+Every TornadoVM-backed demo shows a ControlsFX device-selection dialog before the simulation starts. The dialog is populated from:
 
 ```powershell
-$env:EXTRA_JVM_FLAGS = "-Dgravitygpu.render.readback.interval=2 -Dgravitygpu.state.readback.interval=30"
+tornado --devices
+```
+
+The popup shows the concise command output first and has an on-demand details panel for extra Tornado API information such as memory limits, platform, backend, workgroup dimensions, and OpenCL C version.
+
+For unattended profiling or scripted runs, skip the popup and use TornadoVM's default device:
+
+```powershell
+$env:EXTRA_JVM_FLAGS = "-Dtornado.device.selector.default=true"
 pwsh -File .\run.ps1 7
 ```
 
-- `gravitygpu.render.readback.interval` controls how often `GravityGPU` executes the main Tornado simulation/projection graph and reads projected screen coordinates back to JavaFX. The default is `2`, unless `gravitygpu.readback.interval` is set, in which case that older flag is used as the default value. Lower values update the rendered positions more often, but can increase GPU/host synchronization cost.
-- `gravitygpu.state.readback.interval` controls how often `GravityGPU` explicitly reads full physical positions (`posX`, `posY`, `posZ`) back from the device. The default is `30`, and it is clamped so it can never be lower than the render readback interval. Higher values reduce large device-to-host transfers, but CPU-side collision checks and dashboard metrics see the physical state less often.
+This flag applies to Game of Life, heat distribution, solar eclipse, Earth orbit, Solar System, and `GravityGPU`.
+
+### GravityGPU Runtime Flags
+
+Tune `GravityGPU` readback pacing with JVM system properties. These flags are useful when the GPU computation is quick overall, but TornadoVM/OpenCL execution or host synchronization occasionally causes visible pauses.
+
+- `gravitygpu.render.readback.interval` controls how often `GravityGPU` executes the main Tornado simulation/projection graph and reads projected screen coordinates back to JavaFX when adaptive readback is disabled. The default fixed value is `2`, unless `gravitygpu.readback.interval` is set, in which case that older flag is used as the default value. Lower values update rendered positions more often, but can increase GPU/host synchronization cost.
+- `gravitygpu.state.readback.interval` controls how often `GravityGPU` explicitly reads full physical positions (`posX`, `posY`, `posZ`) back from the device. The default is `30`, and it is clamped so it can never be lower than the active render readback interval. Higher values reduce large device-to-host transfers, but CPU-side collision checks and dashboard metrics see the physical state less often.
 - `gravitygpu.readback.interval` is the older compatibility flag. Prefer `gravitygpu.render.readback.interval` for new runs.
-- `gravitygpu.draw.overlay.cache.frames` controls how many frames `GravityGPU` may reuse the cached JavaFX overlay layer for solar belts and orbit guides before rebuilding it. The default is `2`. Lower values keep overlays more exact while rotating or when optional guide layers are enabled; higher values reduce JavaFX drawing work if those overlays cause draw-time spikes.
+- `gravitygpu.adaptive.readback.enabled` enables conservative readback pacing. The default is `true`. In this mode `GravityGPU` builds the Tornado task graph once at `gravitygpu.adaptive.render.readback.max` and keeps that interval fixed for the run, avoiding mid-animation task-graph rebuilds and the compile pauses they can cause. Set it to `false` to use the fixed `gravitygpu.render.readback.interval` value instead.
+- `gravitygpu.adaptive.render.readback.max` sets the fixed render readback interval used when adaptive readback is enabled. The default is `4`.
+- `gravitygpu.framebudget.skip.enabled` allows `GravityGPU` to skip the next optional simulation/render snapshot after an over-budget frame. The default is `true`. Forced sync frames, collision-check frames, and orbit-guide frames are not skipped.
+- `gravitygpu.framebudget.skip.ms` sets the over-budget threshold used by optional snapshot skipping. The default is `16.0`.
+- Static JavaFX overlays such as the habitable zone, asteroid belt, and weak Sun gravity boundary are cached until their inputs change, for example when the camera moves, the canvas size changes, bodies are reset, or a related checkbox changes.
+- `gravitygpu.orbit.guide.segments` controls how many line segments are used per dynamic orbit guide. The default is `96`, with a minimum of `24`. Lower values reduce JavaFX path rasterization work while `Show orbits` is enabled.
+- `gravitygpu.timing` enables per-frame diagnostic logging. The default is `false`.
+- `gravitygpu.timing.slow.ms` sets the slow-frame threshold used by timing logs. The default is `24.0`.
+- `gravitygpu.timing.summary.frames` controls how often average/max timing summaries are printed. The default is `300`.
 
-When `Show orbits` is enabled in `GravityGPU`, the orbit guides are dynamically recomputed from the current synced position and velocity, so they can change when another body perturbs a planet. This intentionally forces full state and velocity sync at the render readback cadence while orbit guides are visible.
+When `Show orbits` is enabled in `GravityGPU`, the orbit guides are drawn dynamically from the current synced position and velocity instead of being snapshotted into the static overlay cache, so they can change when another body perturbs a planet without forcing an expensive cached-image rebuild every frame. This intentionally forces full state and velocity sync at the render readback cadence while orbit guides are visible. `Align planets on reset` also refreshes CPU-side projection state before rebuilding the static overlays, so the habitable zone, asteroid belt, and weak-gravity indicator stay centered after reset.
 
-For a stable Solar System without custom bodies, a good starting point is:
+When `gravitygpu.timing=true`, slow-frame logs include separate `execute` and `stateSync` timings. `execute` measures `executionPlan.execute()`, while `stateSync` measures explicit full position/velocity `transferToHost(...)`. The same line also reports the active adaptive render `interval` and whether the optional simulation snapshot was skipped as `skippedSim`.
+
+For a stable Solar System without custom bodies, the current default strategy is conservative fixed readback at interval `4`:
 
 ```powershell
-$env:EXTRA_JVM_FLAGS = "-Dgravitygpu.render.readback.interval=2 -Dgravitygpu.state.readback.interval=30"
+$env:EXTRA_JVM_FLAGS = "-Dgravitygpu.adaptive.readback.enabled=true -Dgravitygpu.adaptive.render.readback.max=4 -Dgravitygpu.state.readback.interval=30"
+pwsh -File .\run.ps1 7
+```
+
+For lower render latency, disable adaptive readback and choose a fixed render interval directly:
+
+```powershell
+$env:EXTRA_JVM_FLAGS = "-Dgravitygpu.adaptive.readback.enabled=false -Dgravitygpu.render.readback.interval=2 -Dgravitygpu.state.readback.interval=30"
 pwsh -File .\run.ps1 7
 ```
 
 When adding custom bodies or testing collisions, reduce the full state interval so CPU-side collision handling observes the simulation more frequently:
 
 ```powershell
-$env:EXTRA_JVM_FLAGS = "-Dgravitygpu.render.readback.interval=2 -Dgravitygpu.state.readback.interval=6"
+$env:EXTRA_JVM_FLAGS = "-Dgravitygpu.adaptive.readback.enabled=false -Dgravitygpu.render.readback.interval=2 -Dgravitygpu.state.readback.interval=6"
+pwsh -File .\run.ps1 7
+```
+
+For profiling, enable timing logs and skip the device popup:
+
+```powershell
+$env:EXTRA_JVM_FLAGS = "-Dtornado.device.selector.default=true -Dgravitygpu.timing=true -Dgravitygpu.timing.slow.ms=16 -Dgravitygpu.timing.summary.frames=300"
+pwsh -File .\run.ps1 7
+```
+
+For JVM and GC profiling, add standard JDK diagnostics:
+
+```powershell
+$env:EXTRA_JVM_FLAGS = "-Dtornado.device.selector.default=true -Dgravitygpu.timing=true -Dgravitygpu.timing.slow.ms=16 -Xlog:gc*,safepoint:file=profile-gc-safepoint.log:tags,uptime,time,level -XX:StartFlightRecording=filename=profile-gravitygpu.jfr,settings=profile,dumponexit=true"
 pwsh -File .\run.ps1 7
 ```
 
