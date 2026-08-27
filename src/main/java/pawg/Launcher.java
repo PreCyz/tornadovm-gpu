@@ -1,6 +1,7 @@
 package pawg;
 
 import javafx.application.Application;
+import pawg.body.BodySimulator;
 import pawg.eclipse.SolarEclipseFX;
 import pawg.gameoflife.GameOfLifeInteractive;
 import pawg.gravity.EarthOrbitGPU;
@@ -21,6 +22,7 @@ public class Launcher {
                 case "5" -> Application.launch(SolarSystemGPU.class, args);
                 case "6" -> Application.launch(GravitySystemCPU.class, args);
                 case "7" -> Application.launch(GravityGPU.class, args);
+                case "8" -> Application.launch(BodySimulator.class, args);
                 default -> Application.launch(GameOfLifeInteractive.class, args);
             }
         } else {
