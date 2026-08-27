@@ -28,13 +28,15 @@ final class GravityGpuFramePolicy {
 
     static boolean shouldProjectTrails(boolean showTrails, boolean hasTrailPoints, boolean trailsNeedProjection,
                                        boolean hasCachedProjection, float cameraYaw, float cameraPitch,
-                                       float projectedTrailYaw, float projectedTrailPitch) {
+                                       float cameraRoll, float projectedTrailYaw, float projectedTrailPitch,
+                                       float projectedTrailRoll) {
         return showTrails
                 && hasTrailPoints
                 && (trailsNeedProjection
                 || !hasCachedProjection
                 || Math.abs(cameraYaw - projectedTrailYaw) > 0.0001f
-                || Math.abs(cameraPitch - projectedTrailPitch) > 0.0001f);
+                || Math.abs(cameraPitch - projectedTrailPitch) > 0.0001f
+                || Math.abs(cameraRoll - projectedTrailRoll) > 0.0001f);
     }
 
     static int currentStableSolarSystemTornadoExecutions(int frameCount) {

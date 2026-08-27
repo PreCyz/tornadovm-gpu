@@ -49,7 +49,7 @@ The eclipse animation accepts a duration in seconds and a maximum coverage perce
 
 `SolarSystemGPU` extends that GPU-rendered approach to an 880 x 880 full Solar System view. It renders the Sun glow, all eight planets, subtle orbit lines, Earth land rotation, Jupiter atmospheric bands, and Saturn rings while the JavaFX animation loop updates each planet with a different orbital speed.
 
-`GravitySystemCPU` and `GravityGPU` are interactive n-body gravity simulators. They start with a Sun and planets initialized from Kepler-style circular orbit velocities, compensate the Sun's momentum, draw trails, and expose a side dashboard with mass and velocity. Mouse interaction creates custom bodies in two steps: drag to size the mass, then click to choose the initial velocity vector. The CPU version uses pairwise force accumulation with Verlet integration; the GPU version runs force calculation and motion integration through TornadoVM kernels over fixed-size body arrays.
+`GravitySystemCPU` and `GravityGPU` are interactive n-body gravity simulators. They start with a Sun and planets initialized from Kepler-style circular orbit velocities, compensate the Sun's momentum, draw trails, and expose a side dashboard with mass, radius, distance, velocity, acceleration, and nearest-body details. Mouse interaction creates custom bodies in two steps: drag to size the mass, then click to choose the initial velocity vector. The GPU version also has editable custom-body fields and a `ROTATE` popup for setting camera X/Y/Z rotation directly. The CPU version uses pairwise force accumulation with Verlet integration; the GPU version runs force calculation, motion integration, and projection through TornadoVM kernels over fixed-size body arrays.
 
 ## Requirements
 
@@ -148,9 +148,13 @@ Tune `GravityGPU` readback pacing with JVM system properties. These flags are us
 - `gravitygpu.timing.slow.ms` sets the slow-frame threshold used by timing logs. The default is `24.0`.
 - `gravitygpu.timing.summary.frames` controls how often average/max timing summaries are printed. The default is `300`.
 
+The `GravityGPU` dashboard is populated immediately after startup and refreshes after full state readbacks when the dashboard update interval has elapsed. It no longer depends on the full-state sync frame landing on an exact frame-number multiple, so planet and custom-body details should remain visible even with conservative GPU readback pacing.
+
+The `ROTATE` button opens a camera-rotation dialog. Values are entered in degrees: `X` maps to pitch, `Y` maps to yaw, and `Z` maps to roll. Out-of-range values are clamped to the supported bounds before being applied. The rotation is used consistently by JavaFX overlay drawing, TornadoVM body projection, trail projection, and the axis widget.
+
 When `Show orbits` is enabled in `GravityGPU`, the orbit guides are drawn dynamically from the current synced position and velocity instead of being snapshotted into the static overlay cache, so they can change when another body perturbs a planet without forcing an expensive cached-image rebuild every frame. This intentionally forces full state and velocity sync at the render readback cadence while orbit guides are visible. `Align planets on reset` also refreshes CPU-side projection state before rebuilding the static overlays, so the habitable zone, asteroid belt, and weak-gravity indicator stay centered after reset.
 
-When `gravitygpu.timing=true`, slow-frame logs include separate `execute` and `stateSync` timings. `execute` measures `executionPlan.execute()`, while `stateSync` measures explicit full position/velocity `transferToHost(...)`. The same line also reports the active adaptive render `interval` and whether the optional simulation snapshot was skipped as `skippedSim`.
+When `gravitygpu.timing=true`, slow-frame logs include separate `execute`, `stateSync`, `dashboard`, and JavaFX draw timings. `execute` measures `executionPlan.execute()`, while `stateSync` measures explicit full position/velocity `transferToHost(...)`. The same line also reports the active render `interval`, whether the optional simulation snapshot was skipped as `skippedSim`, and whether static overlays were rebuilt.
 
 For a stable Solar System without custom bodies, the current default strategy is conservative fixed readback at interval `4`:
 
@@ -186,6 +190,8 @@ For JVM and GC profiling, add standard JDK diagnostics:
 $env:EXTRA_JVM_FLAGS = "-Dtornado.device.selector.default=true -Dgravitygpu.timing=true -Dgravitygpu.timing.slow.ms=16 -Xlog:gc*,safepoint:file=profile-gc-safepoint.log:tags,uptime,time,level -XX:StartFlightRecording=filename=profile-gravitygpu.jfr,settings=profile,dumponexit=true"
 pwsh -File .\run.ps1 7
 ```
+
+Recent profiling after the dashboard and camera-rotation changes showed that the dashboard is not the slow-frame bottleneck. In that run, slow frames were still dominated mainly by TornadoVM/OpenCL `execute` stalls, with smaller `stateSync` and occasional JavaFX overlay-draw spikes. GC pauses were short compared with the largest execution stalls.
 
 If PowerShell blocks local script execution, run it for the current command only:
 

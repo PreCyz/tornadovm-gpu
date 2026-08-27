@@ -66,6 +66,12 @@ public class GravityGPU extends Application {
     private static final double SPHERE_PAINT_LIGHT_ANGLE_TOLERANCE_DEGREES = 2.0;
     private static final double SPHERE_PAINT_FOCUS_DISTANCE_TOLERANCE = 0.03;
     private static final double AXIS_VALUE_CHARACTER_WIDTH = 7.2;
+    private static final float CAMERA_PITCH_MIN_RADIANS = -1.35f;
+    private static final float CAMERA_PITCH_MAX_RADIANS = 1.35f;
+    private static final float CAMERA_YAW_MIN_RADIANS = (float) (-Math.PI * 2.0);
+    private static final float CAMERA_YAW_MAX_RADIANS = (float) (Math.PI * 2.0);
+    private static final float CAMERA_ROLL_MIN_RADIANS = (float) (-Math.PI * 2.0);
+    private static final float CAMERA_ROLL_MAX_RADIANS = (float) (Math.PI * 2.0);
     private static final int DASHBOARD_METRIC_STRIDE = 7;
     private static final int DASHBOARD_DISTANCE_FROM_SUN_AU = 0;
     private static final int DASHBOARD_VELOCITY_X_KILOMETERS_PER_SECOND = 1;
@@ -174,7 +180,7 @@ public class GravityGPU extends Application {
 
     private final FloatArray physParams = new FloatArray(2);
     private final FloatArray dashboardParams = new FloatArray(3);
-    private final FloatArray renderParams = new FloatArray(10);
+    private final FloatArray renderParams = new FloatArray(11);
     private final IntArray simulationState = new IntArray(1);
 
     private final String[] bodyNames = new String[MAX_BODIES];
@@ -216,6 +222,7 @@ public class GravityGPU extends Application {
     private boolean showTrails = false;
     private float cameraYaw = 0.0f;
     private float cameraPitch = 0.0f;
+    private float cameraRoll = 0.0f;
     private float dragStartX;
     private float dragStartY;
     private float dragStartYaw;
@@ -223,8 +230,10 @@ public class GravityGPU extends Application {
     private boolean trailsNeedProjection = false;
     private float projectedTrailYaw = Float.NaN;
     private float projectedTrailPitch = Float.NaN;
+    private float projectedTrailRoll = Float.NaN;
     private float cachedAxisYaw = Float.NaN;
     private float cachedAxisPitch = Float.NaN;
+    private float cachedAxisRoll = Float.NaN;
     private String cachedXAxisText = "";
     private String cachedYAxisText = "";
     private String cachedZAxisText = "";
@@ -239,6 +248,7 @@ public class GravityGPU extends Application {
     private double drawOverlayCacheCanvasHeight = -1.0;
     private float drawOverlayCacheYaw = Float.NaN;
     private float drawOverlayCachePitch = Float.NaN;
+    private float drawOverlayCacheRoll = Float.NaN;
     private boolean drawOverlayCacheHabitableZone;
     private boolean drawOverlayCacheAsteroidBelt;
     private boolean drawOverlayCacheWeakSunGravity;
@@ -251,6 +261,7 @@ public class GravityGPU extends Application {
     private long displayedElapsedSeconds = -1L;
     private int projectedBodyCount = 0;
     private int framesSinceDashboardMetrics = 0;
+    private int framesSinceDashboardUpdate = GravityGpuFramePolicy.DASHBOARD_UPDATE_FRAMES;
     private int currentRenderReadbackIntervalFrames = INITIAL_RENDER_READBACK_INTERVAL_FRAMES;
     private boolean skipNextOptionalSimulationSnapshot = false;
     private int visualFramesSinceRenderSnapshot = INITIAL_RENDER_READBACK_INTERVAL_FRAMES;
@@ -408,7 +419,7 @@ public class GravityGPU extends Application {
             float dx = (float) event.getX() - dragStartX;
             float dy = (float) event.getY() - dragStartY;
             cameraYaw = dragStartYaw + dx * 0.006f;
-            cameraPitch = Math.clamp(dragStartPitch - dy * 0.006f, -1.35f, 1.35f);
+            cameraPitch = clampCameraPitch(dragStartPitch - dy * 0.006f);
             markDrawOverlayCacheDirty();
         });
 
@@ -429,10 +440,16 @@ public class GravityGPU extends Application {
         btnAddBody.setFocusTraversable(false);
         btnAddBody.setOnAction(_ -> addEditableBody());
 
+        Button btnRotateCamera = new Button("ROTATE");
+        btnRotateCamera.setTooltip(new Tooltip("Set camera rotation"));
+        btnRotateCamera.setStyle("-fx-background-color: #1b2533; -fx-text-fill: #9ecfff; -fx-border-color: #497aa5; -fx-font-weight: bold; -fx-cursor: hand;");
+        btnRotateCamera.setFocusTraversable(false);
+        btnRotateCamera.setOnAction(_ -> showCameraRotationDialog(primaryStage));
+
         elapsedTimeLabel = new Label("Time: 0s");
         elapsedTimeLabel.setStyle("-fx-text-fill: #00ff88; -fx-font-family: monospace; -fx-font-size: 12px; -fx-font-weight: bold; -fx-padding: 4 0 0 0;");
 
-        HBox resetRow = new HBox(12, btnReset, btnAddBody, elapsedTimeLabel);
+        HBox resetRow = new HBox(10, btnReset, btnAddBody, btnRotateCamera, elapsedTimeLabel);
         resetRow.setStyle("-fx-alignment: center-left;");
 
         CheckBox alignPlanetsCheckbox = new CheckBox("Align planets on reset");
@@ -515,6 +532,8 @@ public class GravityGPU extends Application {
         legend.setStyle("-fx-text-fill: #b8b8c8; -fx-font-family: monospace; -fx-font-size: 11px; -fx-padding: 0 0 6 0;");
 
         sidebar.getChildren().addAll(title, resetRow, optionsGrid, legend, dashboardList);
+        computeDashboardMetricsOnCpu();
+        updateDashboard();
 
         BorderPane root = new BorderPane();
         root.setCenter(canvas);
@@ -555,6 +574,7 @@ public class GravityGPU extends Application {
                 frameCounter++;
                 stageStartNanos = System.nanoTime();
                 framesSinceDashboardMetrics++;
+                framesSinceDashboardUpdate = Math.min(GravityGpuFramePolicy.DASHBOARD_UPDATE_FRAMES, framesSinceDashboardUpdate + 1);
                 visualFramesSinceStateSnapshot = Math.min(GPU_STATE_READBACK_INTERVAL_FRAMES, visualFramesSinceStateSnapshot + 1);
                 boolean forceStateSync = simulationPlanDirty || !simulationPlanReady;
                 boolean scheduledSimulationSnapshot = visualFramesSinceRenderSnapshot >= currentRenderReadbackIntervalFrames;
@@ -615,11 +635,12 @@ public class GravityGPU extends Application {
                     trailsNeedProjection = false;
                     projectedTrailYaw = cameraYaw;
                     projectedTrailPitch = cameraPitch;
+                    projectedTrailRoll = cameraRoll;
                 }
                 long trailProjectionNanos = System.nanoTime() - stageStartNanos;
 
                 stageStartNanos = System.nanoTime();
-                if (syncedStateSnapshot && GravityGpuFramePolicy.shouldUpdateDashboard(frameCounter)) {
+                if (syncedStateSnapshot && shouldRefreshDashboardAfterStateSync()) {
                     computeDashboardMetricsOnCpu();
                     updateDashboard();
                 }
@@ -757,6 +778,7 @@ public class GravityGPU extends Application {
                 || Math.abs(drawOverlayCacheCanvasHeight - canvasHeight) > 0.5
                 || Math.abs(drawOverlayCacheYaw - cameraYaw) > 0.0001f
                 || Math.abs(drawOverlayCachePitch - cameraPitch) > 0.0001f
+                || Math.abs(drawOverlayCacheRoll - cameraRoll) > 0.0001f
                 || drawOverlayCacheHabitableZone != showHabitableZone
                 || drawOverlayCacheAsteroidBelt != showAsteroidBelt
                 || drawOverlayCacheWeakSunGravity != showWeakSunGravity;
@@ -777,6 +799,7 @@ public class GravityGPU extends Application {
         drawOverlayCacheCanvasHeight = canvasHeight;
         drawOverlayCacheYaw = cameraYaw;
         drawOverlayCachePitch = cameraPitch;
+        drawOverlayCacheRoll = cameraRoll;
         drawOverlayCacheHabitableZone = showHabitableZone;
         drawOverlayCacheAsteroidBelt = showAsteroidBelt;
         drawOverlayCacheWeakSunGravity = showWeakSunGravity;
@@ -882,7 +905,7 @@ public class GravityGPU extends Application {
         ScreenPoint zAxis = projectUnitAxis(0.0f, 0.0f, 1.0f);
         gc.setTextBaseline(VPos.BOTTOM);
         gc.setFont(Font.font("Monospaced", 11));
-        drawAxisValues(gc, centerX + 78.0, centerY - 62.0, xAxis, yAxis, zAxis);
+        drawAxisValues(gc, centerX + 78.0, centerY - 62.0);
 
         drawAxisLine(gc, centerX, centerY, axisLength, xAxis, AXIS_X_COLOR, "X");
         drawAxisLine(gc, centerX, centerY, axisLength, yAxis, AXIS_Y_COLOR, "Y");
@@ -892,8 +915,8 @@ public class GravityGPU extends Application {
         gc.fillOval(centerX - 2.5, centerY - 2.5, 5.0, 5.0);
     }
 
-    private void drawAxisValues(GraphicsContext gc, double rightX, double y, ScreenPoint xAxis, ScreenPoint yAxis, ScreenPoint zAxis) {
-        updateAxisValueTextCache(xAxis, yAxis, zAxis);
+    private void drawAxisValues(GraphicsContext gc, double rightX, double y) {
+        updateAxisValueTextCache();
         double spaceWidth = axisTextWidth(" ");
 
         gc.setTextAlign(TextAlignment.RIGHT);
@@ -903,21 +926,23 @@ public class GravityGPU extends Application {
         drawAxisValueRight(gc, x, y, cachedXAxisText, AXIS_X_COLOR);
     }
 
-    private void updateAxisValueTextCache(ScreenPoint xAxis, ScreenPoint yAxis, ScreenPoint zAxis) {
+    private void updateAxisValueTextCache() {
         if (Float.isNaN(cachedAxisYaw)
                 || Float.isNaN(cachedAxisPitch)
                 || Math.abs(cameraYaw - cachedAxisYaw) > 0.0001f
-                || Math.abs(cameraPitch - cachedAxisPitch) > 0.0001f) {
-            cachedXAxisText = axisValueText("X", xAxis);
-            cachedYAxisText = axisValueText("Y", yAxis);
-            cachedZAxisText = axisValueText("Z", zAxis);
+                || Math.abs(cameraPitch - cachedAxisPitch) > 0.0001f
+                || Math.abs(cameraRoll - cachedAxisRoll) > 0.0001f) {
+            cachedXAxisText = axisValueText("X", cameraPitch);
+            cachedYAxisText = axisValueText("Y", cameraYaw);
+            cachedZAxisText = axisValueText("Z", cameraRoll);
             cachedAxisYaw = cameraYaw;
             cachedAxisPitch = cameraPitch;
+            cachedAxisRoll = cameraRoll;
         }
     }
 
-    private String axisValueText(String label, ScreenPoint axisPoint) {
-        return String.format("%s %.1f,%.1f,%.1f", label, axisPoint.x(), axisPoint.y(), axisPoint.depthScale());
+    private String axisValueText(String label, float radians) {
+        return String.format("%s %.1fdeg", label, Math.toDegrees(radians));
     }
 
     private double drawAxisValueRight(GraphicsContext gc, double rightX, double y, String text, Color color) {
@@ -960,12 +985,16 @@ public class GravityGPU extends Application {
         float sinYaw = (float) Math.sin(cameraYaw);
         float cosPitch = (float) Math.cos(cameraPitch);
         float sinPitch = (float) Math.sin(cameraPitch);
+        float cosRoll = (float) Math.cos(cameraRoll);
+        float sinRoll = (float) Math.sin(cameraRoll);
 
         float yawX = axisX * cosYaw + axisZ * sinYaw;
         float yawZ = -axisX * sinYaw + axisZ * cosYaw;
-        float viewX = yawX;
-        float viewY = axisY * cosPitch - yawZ * sinPitch;
+        float pitchedX = yawX;
+        float pitchedY = axisY * cosPitch - yawZ * sinPitch;
         float viewZ = axisY * sinPitch + yawZ * cosPitch;
+        float viewX = pitchedX * cosRoll - pitchedY * sinRoll;
+        float viewY = pitchedX * sinRoll + pitchedY * cosRoll;
         float depth = 1.0f + viewZ * 0.22f;
         return new ScreenPoint(viewX, viewY, depth);
     }
@@ -1232,12 +1261,16 @@ public class GravityGPU extends Application {
         float sinYaw = (float) Math.sin(cameraYaw);
         float cosPitch = (float) Math.cos(cameraPitch);
         float sinPitch = (float) Math.sin(cameraPitch);
+        float cosRoll = (float) Math.cos(cameraRoll);
+        float sinRoll = (float) Math.sin(cameraRoll);
 
         float yawX = physicsX * cosYaw + physicsZ * sinYaw;
         float yawZ = -physicsX * sinYaw + physicsZ * cosYaw;
-        float viewX = yawX;
-        float viewY = physicsY * cosPitch - yawZ * sinPitch;
+        float pitchedX = yawX;
+        float pitchedY = physicsY * cosPitch - yawZ * sinPitch;
         float viewZ = physicsY * sinPitch + yawZ * cosPitch;
+        float viewX = pitchedX * cosRoll - pitchedY * sinRoll;
+        float viewY = pitchedX * sinRoll + pitchedY * cosRoll;
         float physicsDistance = (float) Math.sqrt(physicsX * physicsX + physicsY * physicsY + physicsZ * physicsZ);
 
         if (physicsDistance <= 0.000001f) {
@@ -1296,11 +1329,13 @@ public class GravityGPU extends Application {
                 showTrails,
                 hasTrailPoints(),
                 trailsNeedProjection,
-                !Float.isNaN(projectedTrailYaw) && !Float.isNaN(projectedTrailPitch),
+                !Float.isNaN(projectedTrailYaw) && !Float.isNaN(projectedTrailPitch) && !Float.isNaN(projectedTrailRoll),
                 cameraYaw,
                 cameraPitch,
+                cameraRoll,
                 projectedTrailYaw,
-                projectedTrailPitch);
+                projectedTrailPitch,
+                projectedTrailRoll);
     }
 
     private boolean hasTrailPoints() {
@@ -1330,9 +1365,10 @@ public class GravityGPU extends Application {
         trailZ.set(index, z);
         projectedTrailX.set(index, screenX);
         projectedTrailY.set(index, screenY);
-        if (Float.isNaN(projectedTrailYaw) || Float.isNaN(projectedTrailPitch)) {
+        if (Float.isNaN(projectedTrailYaw) || Float.isNaN(projectedTrailPitch) || Float.isNaN(projectedTrailRoll)) {
             projectedTrailYaw = cameraYaw;
             projectedTrailPitch = cameraPitch;
+            projectedTrailRoll = cameraRoll;
         }
     }
 
@@ -1356,6 +1392,7 @@ public class GravityGPU extends Application {
         }
         projectedTrailYaw = Float.NaN;
         projectedTrailPitch = Float.NaN;
+        projectedTrailRoll = Float.NaN;
         trailsNeedProjection = false;
     }
 
@@ -1808,6 +1845,7 @@ public class GravityGPU extends Application {
         computeDashboardMetricsOnCpu();
         projectedTrailYaw = Float.NaN;
         projectedTrailPitch = Float.NaN;
+        projectedTrailRoll = Float.NaN;
         trailsNeedProjection = false;
     }
 
@@ -1830,6 +1868,14 @@ public class GravityGPU extends Application {
             return true;
         }
         return GravityGpuFramePolicy.shouldExecuteSimulationSnapshotFrame(frameCounter, GPU_STATE_READBACK_INTERVAL_FRAMES);
+    }
+
+    private boolean shouldRefreshDashboardAfterStateSync() {
+        if (framesSinceDashboardUpdate < GravityGpuFramePolicy.DASHBOARD_UPDATE_FRAMES) {
+            return false;
+        }
+        framesSinceDashboardUpdate = 0;
+        return true;
     }
 
     private void markSimulationPlanDirty() {
@@ -1877,14 +1923,15 @@ public class GravityGPU extends Application {
     private void updateRenderParams() {
         renderParams.set(0, cameraYaw);
         renderParams.set(1, cameraPitch);
-        renderParams.set(2, (float) canvasWidth);
-        renderParams.set(3, (float) canvasHeight);
-        renderParams.set(4, PHYSICS_UNITS_PER_AU);
-        renderParams.set(5, MERCURY_AU);
-        renderParams.set(6, NEPTUNE_AU);
-        renderParams.set(7, MIN_PLANET_ORBIT_RADIUS);
-        renderParams.set(8, ORBIT_EDGE_PADDING);
-        renderParams.set(9, PHYSICS_UNITS_PER_AU * 55.0f);
+        renderParams.set(2, cameraRoll);
+        renderParams.set(3, (float) canvasWidth);
+        renderParams.set(4, (float) canvasHeight);
+        renderParams.set(5, PHYSICS_UNITS_PER_AU);
+        renderParams.set(6, MERCURY_AU);
+        renderParams.set(7, NEPTUNE_AU);
+        renderParams.set(8, MIN_PLANET_ORBIT_RADIUS);
+        renderParams.set(9, ORBIT_EDGE_PADDING);
+        renderParams.set(10, PHYSICS_UNITS_PER_AU * 55.0f);
     }
 
     private void detectAndResolveCollisionsOnCpu() {
@@ -2162,6 +2209,83 @@ public class GravityGPU extends Application {
                 || massFields[i] != null || velocityXFields[i] != null || velocityYFields[i] != null || velocityZFields[i] != null));
     }
 
+    private void showCameraRotationDialog(Stage owner) {
+        TextField xField = rotationField(cameraPitch);
+        TextField yField = rotationField(cameraYaw);
+        TextField zField = rotationField(cameraRoll);
+
+        GridPane grid = new GridPane();
+        grid.setHgap(8);
+        grid.setVgap(8);
+        grid.setStyle("-fx-padding: 8;");
+        addRotationField(grid, "X", xField, 0, CAMERA_PITCH_MIN_RADIANS, CAMERA_PITCH_MAX_RADIANS);
+        addRotationField(grid, "Y", yField, 1, CAMERA_YAW_MIN_RADIANS, CAMERA_YAW_MAX_RADIANS);
+        addRotationField(grid, "Z", zField, 2, CAMERA_ROLL_MIN_RADIANS, CAMERA_ROLL_MAX_RADIANS);
+
+        Dialog<ButtonType> dialog = new Dialog<>();
+        dialog.setTitle("Camera Rotation");
+        dialog.setHeaderText("Set camera rotation in degrees");
+        if (owner != null && owner.getScene() != null) {
+            dialog.initOwner(owner);
+        }
+        ButtonType applyButtonType = new ButtonType("Apply", ButtonBar.ButtonData.OK_DONE);
+        dialog.getDialogPane().getButtonTypes().addAll(applyButtonType, ButtonType.CANCEL);
+        dialog.getDialogPane().setContent(grid);
+
+        dialog.showAndWait().ifPresent(buttonType -> {
+            if (buttonType == applyButtonType) {
+                applyCameraRotationFields(xField, yField, zField);
+            }
+        });
+    }
+
+    private TextField rotationField(float radians) {
+        TextField field = new TextField(String.format("%.2f", Math.toDegrees(radians)));
+        field.setPrefWidth(90.0);
+        field.setStyle("-fx-font-family: monospace; -fx-font-size: 12px;");
+        return field;
+    }
+
+    private void addRotationField(GridPane grid, String labelText, TextField field, int row, float minRadians, float maxRadians) {
+        Label label = new Label(String.format("%s [%.1f..%.1f]", labelText, Math.toDegrees(minRadians), Math.toDegrees(maxRadians)));
+        label.setStyle("-fx-font-family: monospace; -fx-font-size: 12px;");
+        grid.add(label, 0, row);
+        grid.add(field, 1, row);
+    }
+
+    private void applyCameraRotationFields(TextField xField, TextField yField, TextField zField) {
+        try {
+            applyCameraRotation(
+                    degreesToRadians(parseField(xField), CAMERA_PITCH_MIN_RADIANS, CAMERA_PITCH_MAX_RADIANS),
+                    degreesToRadians(parseField(yField), CAMERA_YAW_MIN_RADIANS, CAMERA_YAW_MAX_RADIANS),
+                    degreesToRadians(parseField(zField), CAMERA_ROLL_MIN_RADIANS, CAMERA_ROLL_MAX_RADIANS));
+        } catch (NumberFormatException _) {
+            xField.setText(String.format("%.2f", Math.toDegrees(cameraPitch)));
+            yField.setText(String.format("%.2f", Math.toDegrees(cameraYaw)));
+            zField.setText(String.format("%.2f", Math.toDegrees(cameraRoll)));
+        }
+    }
+
+    private float degreesToRadians(float degrees, float minRadians, float maxRadians) {
+        return Math.clamp((float) Math.toRadians(degrees), minRadians, maxRadians);
+    }
+
+    private void applyCameraRotation(float pitch, float yaw, float roll) {
+        cameraPitch = clampCameraPitch(pitch);
+        cameraYaw = Math.clamp(yaw, CAMERA_YAW_MIN_RADIANS, CAMERA_YAW_MAX_RADIANS);
+        cameraRoll = Math.clamp(roll, CAMERA_ROLL_MIN_RADIANS, CAMERA_ROLL_MAX_RADIANS);
+        projectedTrailYaw = Float.NaN;
+        projectedTrailPitch = Float.NaN;
+        projectedTrailRoll = Float.NaN;
+        trailsNeedProjection = true;
+        refreshProjectedScreenPositionsOnCpu();
+        markDrawOverlayCacheDirty();
+    }
+
+    private float clampCameraPitch(float pitch) {
+        return Math.clamp(pitch, CAMERA_PITCH_MIN_RADIANS, CAMERA_PITCH_MAX_RADIANS);
+    }
+
     private HBox createDashboardRow(int i) {
         String hexColor = toHex(bodyColors[i]);
         Label label = new Label();
@@ -2187,10 +2311,10 @@ public class GravityGPU extends Application {
             addEditorField(editorGrid, "X", positionXFields[i], 0, 0);
             addEditorField(editorGrid, "Y", positionYFields[i], 2, 0);
             addEditorField(editorGrid, "Z", positionZFields[i], 4, 0);
-            addEditorField(editorGrid, "M", massFields[i], 0, 1);
-            addEditorField(editorGrid, "Vx", velocityXFields[i], 2, 1);
-            addEditorField(editorGrid, "Vy", velocityYFields[i], 4, 1);
-            addEditorField(editorGrid, "Vz", velocityZFields[i], 0, 2);
+            addEditorField(editorGrid, "Vx", velocityXFields[i], 0, 1);
+            addEditorField(editorGrid, "Vy", velocityYFields[i], 2, 1);
+            addEditorField(editorGrid, "Vz", velocityZFields[i], 4, 1);
+            addEditorField(editorGrid, "M", massFields[i], 0, 2);
             VBox editableLayout = new VBox(3, label, editorGrid);
             row.getChildren().add(editableLayout);
         } else {
@@ -2375,6 +2499,7 @@ public class GravityGPU extends Application {
         if (alignPlanetsOnReset) {
             cameraYaw = 0.0f;
             cameraPitch = 0.0f;
+            cameraRoll = 0.0f;
         }
 
         for (int i = 0; i < MAX_BODIES; i++) {
@@ -2451,6 +2576,7 @@ public class GravityGPU extends Application {
             resetBodySnapshots(i);
         }
         framesSinceDashboardMetrics = 0;
+        framesSinceDashboardUpdate = GravityGpuFramePolicy.DASHBOARD_UPDATE_FRAMES;
         resetAdaptiveRenderReadbackInterval();
         visualFramesSinceStateSnapshot = GPU_STATE_READBACK_INTERVAL_FRAMES;
         updateInterpolatedStateRenderPositions();

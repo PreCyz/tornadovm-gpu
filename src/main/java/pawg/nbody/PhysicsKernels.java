@@ -385,20 +385,23 @@ final class PhysicsKernels {
 
         float yaw = renderParams.get(0);
         float pitch = renderParams.get(1);
-        float canvasWidth = renderParams.get(2);
-        float canvasHeight = renderParams.get(3);
-        float physicsUnitsPerAu = renderParams.get(4);
-        float mercuryAu = renderParams.get(5);
-        float neptuneAu = renderParams.get(6);
-        float minPlanetOrbitRadius = renderParams.get(7);
-        float orbitEdgePadding = renderParams.get(8);
-        float depthScaleDenominator = renderParams.get(9);
+        float roll = renderParams.get(2);
+        float canvasWidth = renderParams.get(3);
+        float canvasHeight = renderParams.get(4);
+        float physicsUnitsPerAu = renderParams.get(5);
+        float mercuryAu = renderParams.get(6);
+        float neptuneAu = renderParams.get(7);
+        float minPlanetOrbitRadius = renderParams.get(8);
+        float orbitEdgePadding = renderParams.get(9);
+        float depthScaleDenominator = renderParams.get(10);
         int numBodies = simulationState.get(0);
 
         float cosYaw = TornadoMath.cos(yaw);
         float sinYaw = TornadoMath.sin(yaw);
         float cosPitch = TornadoMath.cos(pitch);
         float sinPitch = TornadoMath.sin(pitch);
+        float cosRoll = TornadoMath.cos(roll);
+        float sinRoll = TornadoMath.sin(roll);
         float centerX = canvasWidth * 0.5f;
         float centerY = canvasHeight * 0.5f;
         float maxOrbitRadius = TornadoMath.min(canvasWidth, canvasHeight) * 0.5f - orbitEdgePadding;
@@ -421,9 +424,11 @@ final class PhysicsKernels {
             float physicsZ = pz.get(i);
             float yawX = physicsX * cosYaw + physicsZ * sinYaw;
             float yawZ = -physicsX * sinYaw + physicsZ * cosYaw;
-            float viewX = yawX;
-            float viewY = physicsY * cosPitch - yawZ * sinPitch;
+            float pitchedX = yawX;
+            float pitchedY = physicsY * cosPitch - yawZ * sinPitch;
             float viewZ = physicsY * sinPitch + yawZ * cosPitch;
+            float viewX = pitchedX * cosRoll - pitchedY * sinRoll;
+            float viewY = pitchedX * sinRoll + pitchedY * cosRoll;
             float physicsDistance = TornadoMath.sqrt(physicsX * physicsX + physicsY * physicsY + physicsZ * physicsZ);
 
             float scale = 1.0f + viewZ / depthScaleDenominator;
@@ -468,14 +473,15 @@ final class PhysicsKernels {
 
         float yaw = renderParams.get(0);
         float pitch = renderParams.get(1);
-        float canvasWidth = renderParams.get(2);
-        float canvasHeight = renderParams.get(3);
-        float physicsUnitsPerAu = renderParams.get(4);
-        float mercuryAu = renderParams.get(5);
-        float neptuneAu = renderParams.get(6);
-        float minPlanetOrbitRadius = renderParams.get(7);
-        float orbitEdgePadding = renderParams.get(8);
-        float depthScaleDenominator = renderParams.get(9);
+        float roll = renderParams.get(2);
+        float canvasWidth = renderParams.get(3);
+        float canvasHeight = renderParams.get(4);
+        float physicsUnitsPerAu = renderParams.get(5);
+        float mercuryAu = renderParams.get(6);
+        float neptuneAu = renderParams.get(7);
+        float minPlanetOrbitRadius = renderParams.get(8);
+        float orbitEdgePadding = renderParams.get(9);
+        float depthScaleDenominator = renderParams.get(10);
         int numBodies = simulationState.get(0);
         int totalTrailPoints = numBodies * TRAIL_CAPACITY;
 
@@ -483,6 +489,8 @@ final class PhysicsKernels {
         float sinYaw = TornadoMath.sin(yaw);
         float cosPitch = TornadoMath.cos(pitch);
         float sinPitch = TornadoMath.sin(pitch);
+        float cosRoll = TornadoMath.cos(roll);
+        float sinRoll = TornadoMath.sin(roll);
         float centerX = canvasWidth * 0.5f;
         float centerY = canvasHeight * 0.5f;
         float maxOrbitRadius = TornadoMath.min(canvasWidth, canvasHeight) * 0.5f - orbitEdgePadding;
@@ -507,9 +515,11 @@ final class PhysicsKernels {
             float physicsZ = trailZ.get(index);
             float yawX = physicsX * cosYaw + physicsZ * sinYaw;
             float yawZ = -physicsX * sinYaw + physicsZ * cosYaw;
-            float viewX = yawX;
-            float viewY = physicsY * cosPitch - yawZ * sinPitch;
+            float pitchedX = yawX;
+            float pitchedY = physicsY * cosPitch - yawZ * sinPitch;
             float viewZ = physicsY * sinPitch + yawZ * cosPitch;
+            float viewX = pitchedX * cosRoll - pitchedY * sinRoll;
+            float viewY = pitchedX * sinRoll + pitchedY * cosRoll;
             float physicsDistance = TornadoMath.sqrt(physicsX * physicsX + physicsY * physicsY + physicsZ * physicsZ);
 
             if (physicsDistance <= 0.000001f) {

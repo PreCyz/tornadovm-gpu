@@ -82,6 +82,8 @@ class GravityGpuFramePolicyTest {
                 false,
                 0.0f,
                 0.0f,
+                0.0f,
+                Float.NaN,
                 Float.NaN,
                 Float.NaN));
     }
@@ -95,6 +97,8 @@ class GravityGpuFramePolicyTest {
                 false,
                 0.0f,
                 0.0f,
+                0.0f,
+                Float.NaN,
                 Float.NaN,
                 Float.NaN));
 
@@ -106,6 +110,8 @@ class GravityGpuFramePolicyTest {
                 0.0f,
                 0.0f,
                 0.0f,
+                0.0f,
+                0.0f,
                 0.0f));
 
         assertTrue(GravityGpuFramePolicy.shouldProjectTrails(
@@ -113,6 +119,20 @@ class GravityGpuFramePolicyTest {
                 true,
                 false,
                 true,
+                0.01f,
+                0.0f,
+                0.0f,
+                0.0f,
+                0.0f,
+                0.0f));
+
+        assertTrue(GravityGpuFramePolicy.shouldProjectTrails(
+                true,
+                true,
+                false,
+                true,
+                0.0f,
+                0.0f,
                 0.01f,
                 0.0f,
                 0.0f,
