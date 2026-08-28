@@ -38,6 +38,39 @@ public final class TornadoDeviceSelector {
         return plan.withDevice(device);
     }
 
+    public static List<TornadoDeviceChoice> deviceChoices() {
+        return TornadoDeviceCommand.detectDevices();
+    }
+
+    public static TornadoDeviceChoice initialDeviceChoice(List<TornadoDeviceChoice> devices) {
+        if (devices == null || devices.isEmpty()) {
+            return defaultDeviceChoice();
+        }
+        return devices.stream()
+                .filter(TornadoDeviceChoice::defaultDevice)
+                .findFirst()
+                .orElse(devices.getFirst());
+    }
+
+    public static TornadoDevice resolveDevice(Stage owner, TornadoDeviceChoice choice) {
+        if (choice == null) {
+            return null;
+        }
+        try {
+            return TornadoExecutionPlan.getDevice(choice.driverIndex(), choice.deviceIndex());
+        } catch (RuntimeException e) {
+            Alert alert = new Alert(Alert.AlertType.WARNING);
+            alert.setTitle("TornadoVM Device");
+            alert.setHeaderText("Could not select Tornado device " + choice.tornadoDeviceId());
+            alert.setContentText("The simulation will use TornadoVM's default device.\n\n" + e.getMessage());
+            if (owner != null && owner.getScene() != null) {
+                alert.initOwner(owner);
+            }
+            alert.showAndWait();
+            return null;
+        }
+    }
+
     public TornadoDeviceChoice showAndWait(Stage owner) {
         List<TornadoDeviceChoice> devices = TornadoDeviceCommand.detectDevices();
         TornadoDeviceChoice initialSelection = devices.stream()
@@ -102,25 +135,6 @@ public final class TornadoDeviceSelector {
                 .filter(TornadoDeviceChoice::defaultDevice)
                 .findFirst()
                 .orElse(devices.getFirst());
-    }
-
-    private static TornadoDevice resolveDevice(Stage owner, TornadoDeviceChoice choice) {
-        if (choice == null) {
-            return null;
-        }
-        try {
-            return TornadoExecutionPlan.getDevice(choice.driverIndex(), choice.deviceIndex());
-        } catch (RuntimeException e) {
-            Alert alert = new Alert(Alert.AlertType.WARNING);
-            alert.setTitle("TornadoVM Device");
-            alert.setHeaderText("Could not select Tornado device " + choice.tornadoDeviceId());
-            alert.setContentText("The simulation will use TornadoVM's default device.\n\n" + e.getMessage());
-            if (owner != null && owner.getScene() != null) {
-                alert.initOwner(owner);
-            }
-            alert.showAndWait();
-            return null;
-        }
     }
 
     private Node deviceDetailsNode(TornadoDeviceChoice choice) {

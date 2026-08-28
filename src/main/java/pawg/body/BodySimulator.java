@@ -12,6 +12,7 @@ import javafx.scene.layout.*;
 import javafx.scene.paint.*;
 import javafx.stage.Screen;
 import javafx.stage.Stage;
+import pawg.nbody.TornadoDeviceChoice;
 import pawg.nbody.TornadoDeviceSelector;
 import uk.ac.manchester.tornado.api.*;
 import uk.ac.manchester.tornado.api.common.TornadoDevice;
@@ -35,12 +36,15 @@ public class BodySimulator extends Application {
     private static final double GRID_STEP = 0.5;
     private static final double SPACE_BEND_SCALE = 0.025;
     private static final double SPACE_BEND_LIMIT = 70.0;
-    private static final int PHOTON_STEPS = 900;
+    private static final int PHOTON_MIN_STEPS = 900;
+    private static final int PHOTON_MAX_STEPS = 60_000;
     private static final double PHOTON_STEP_DISTANCE = 0.08;
+    private static final double PHOTON_MIN_STEP_DISTANCE = 0.012;
     private static final double PHOTON_LIGHT_SPEED = 160.0;
     private static final double BLACK_HOLE_MASS_THRESHOLD = 2_000.0;
     private static final double BLACK_HOLE_CAPTURE_RADIUS_MULTIPLIER = 1.0;
     private static final double PHOTON_IMPACT_PARAMETER = 2.4;
+    private static final double PHOTON_EXIT_MARGIN_PIXELS = 120.0;
     private static final int FULL_TRACK_RENDER_POINT_LIMIT = 2_000;
     private static final String GREEN_BUTTON_STYLE = "-fx-background-color: #1d2b24; -fx-text-fill: #00ff88; -fx-border-color: #00aa66; -fx-font-weight: bold; -fx-cursor: hand;";
     private static final String RED_BUTTON_STYLE = "-fx-background-color: #222; -fx-text-fill: #ff4444; -fx-border-color: #ff4444; -fx-font-weight: bold; -fx-cursor: hand;";
@@ -91,6 +95,7 @@ public class BodySimulator extends Application {
     private Canvas canvas;
     private TornadoExecutionPlan executionPlan;
     private TornadoDevice selectedDevice;
+    private TornadoDeviceChoice selectedDeviceChoice;
     private int bodyCount;
     private int initialBodyCount;
     private boolean running;
@@ -142,39 +147,39 @@ public class BodySimulator extends Application {
         applyGravityButtonStyle(resetButton, RED_BUTTON_STYLE);
         resetButton.setOnAction(_ -> resetToInitialState());
 
-        Button deviceButton = new Button("GPU device");
-        applyGravityButtonStyle(deviceButton, BLUE_BUTTON_STYLE);
-        deviceButton.setOnAction(_ -> changeDevice(stage));
-
         Button photonButton = new Button("Photon");
         photonButton.setTooltip(new Tooltip("Shoot a photon toward Body 1"));
         applyGravityButtonStyle(photonButton, BLUE_BUTTON_STYLE);
         photonButton.setOnAction(_ -> shootPhoton());
 
+        ComboBox<TornadoDeviceChoice> deviceCombo = createDeviceCombo(stage);
+
         CheckBox trailsBox = new CheckBox("Trails");
+        applyControlCheckboxStyle(trailsBox);
         trailsBox.selectedProperty().addListener((_, _, selected) -> {
             showTrails = selected;
             clearTrails();
         });
 
         CheckBox fullTrackBox = new CheckBox("Full track");
+        applyControlCheckboxStyle(fullTrackBox);
         fullTrackBox.selectedProperty().addListener((_, _, selected) -> showFullTracks = selected);
 
         CheckBox orbitBox = new CheckBox("Stable orbits");
+        applyControlCheckboxStyle(orbitBox);
         orbitBox.selectedProperty().addListener((_, _, selected) -> showOrbits = selected);
 
-        GridPane controlsGrid = new GridPane();
-        controlsGrid.setHgap(8);
-        controlsGrid.setVgap(7);
-        controlsGrid.setStyle("-fx-alignment: center-left;");
-        controlsGrid.add(addButton, 0, 0);
-        controlsGrid.add(startButton, 1, 0);
-        controlsGrid.add(resetButton, 2, 0);
-        controlsGrid.add(deviceButton, 3, 0);
-        controlsGrid.add(photonButton, 4, 0);
-        controlsGrid.add(trailsBox, 0, 1);
-        controlsGrid.add(fullTrackBox, 1, 1);
-        controlsGrid.add(orbitBox, 2, 1);
+        FlowPane controlsPane = new FlowPane(8.0, 7.0);
+        controlsPane.setPrefWrapLength(SIDEBAR_WIDTH - 42.0);
+        controlsPane.getChildren().addAll(
+                addButton,
+                startButton,
+                resetButton,
+                photonButton,
+                deviceCombo,
+                trailsBox,
+                fullTrackBox,
+                orbitBox);
 
         editorList.setStyle("-fx-background-color: #10131c;");
         dashboard.setStyle("-fx-background-color: #10131c;");
@@ -200,7 +205,7 @@ public class BodySimulator extends Application {
         dashboardScroll.setStyle("-fx-background: #10131c; -fx-background-color: #10131c; -fx-control-inner-background: #10131c;");
         VBox.setVgrow(dashboardScroll, Priority.ALWAYS);
 
-        VBox side = new VBox(10, title, controlsGrid, help, units, sectionLabel("Initial bodies"), editorScroll, sectionLabel("Dashboard"), dashboardScroll);
+        VBox side = new VBox(10, title, controlsPane, help, units, sectionLabel("Initial bodies"), editorScroll, sectionLabel("Dashboard"), dashboardScroll);
         side.setPadding(new Insets(14));
         side.setPrefWidth(SIDEBAR_WIDTH);
         side.setStyle("-fx-background-color: #10131c; -fx-border-color: #2b3142; -fx-border-width: 0 0 0 1;");
@@ -215,7 +220,6 @@ public class BodySimulator extends Application {
         stage.setHeight(bounds.getHeight());
         stage.show();
 
-        chooseInitialDevice(stage);
         snapshotInitialState();
         draw();
         updateDashboard();
@@ -244,12 +248,44 @@ public class BodySimulator extends Application {
         }.start();
     }
 
-    private void chooseInitialDevice(Stage stage) {
-        selectedDevice = TornadoDeviceSelector.selectDevice(stage);
+    private ComboBox<TornadoDeviceChoice> createDeviceCombo(Stage stage) {
+        ComboBox<TornadoDeviceChoice> deviceCombo = new ComboBox<>();
+        List<TornadoDeviceChoice> devices = TornadoDeviceSelector.deviceChoices();
+        selectedDeviceChoice = TornadoDeviceSelector.initialDeviceChoice(devices);
+        selectedDevice = TornadoDeviceSelector.resolveDevice(stage, selectedDeviceChoice);
+        deviceCombo.getItems().setAll(devices);
+        deviceCombo.setValue(selectedDeviceChoice);
+        deviceCombo.setTooltip(new Tooltip("GPU device"));
+        deviceCombo.setPrefWidth(250.0);
+        deviceCombo.setMinWidth(250.0);
+        deviceCombo.setMaxWidth(250.0);
+        deviceCombo.setStyle("-fx-background-color: #1b2533; -fx-border-color: #497aa5; -fx-mark-color: #9ecfff; -fx-text-fill: white;");
+        deviceCombo.setButtonCell(tornadoDeviceListCell());
+        deviceCombo.setCellFactory(_ -> tornadoDeviceListCell());
+        deviceCombo.valueProperty().addListener((_, previousDevice, chosenDevice) -> {
+            if (chosenDevice == null || chosenDevice.equals(previousDevice)) {
+                return;
+            }
+            changeDevice(stage, chosenDevice);
+        });
+        return deviceCombo;
     }
 
-    private void changeDevice(Stage stage) {
-        selectedDevice = TornadoDeviceSelector.selectDevice(stage);
+    private ListCell<TornadoDeviceChoice> tornadoDeviceListCell() {
+        return new ListCell<>() {
+            @Override
+            protected void updateItem(TornadoDeviceChoice item, boolean empty) {
+                super.updateItem(item, empty);
+                setText(empty || item == null ? null : item.toString());
+                setTextFill(Color.WHITE);
+                setStyle("-fx-background-color: #1b2533;");
+            }
+        };
+    }
+
+    private void changeDevice(Stage stage, TornadoDeviceChoice deviceChoice) {
+        selectedDeviceChoice = deviceChoice;
+        selectedDevice = TornadoDeviceSelector.resolveDevice(stage, deviceChoice);
         executionPlan = null;
         planDirty = true;
         resetToInitialState();
@@ -425,7 +461,14 @@ public class BodySimulator extends Application {
 
     private void applyGravityButtonStyle(Button button, String style) {
         button.setStyle(style);
+        button.setMinWidth(Region.USE_PREF_SIZE);
         button.setFocusTraversable(false);
+    }
+
+    private void applyControlCheckboxStyle(CheckBox checkBox) {
+        checkBox.setStyle("-fx-text-fill: white;");
+        checkBox.setMinWidth(Region.USE_PREF_SIZE);
+        checkBox.setFocusTraversable(false);
     }
 
     private Label sectionLabel(String text) {
@@ -594,7 +637,20 @@ public class BodySimulator extends Application {
         if (visiblePoints < 2) {
             return;
         }
+        gc.setLineWidth(4.0);
+        gc.setStroke(Color.rgb(4, 6, 12, 0.82));
+        strokePhotonSegments(gc, visiblePoints);
+        gc.setLineWidth(2.0);
         gc.setStroke(Color.rgb(255, 245, 120));
+        strokePhotonSegments(gc, visiblePoints);
+
+        Point3 head = photonPath.get(visiblePoints - 1);
+        gc.setFill(Color.rgb(255, 255, 190));
+        gc.fillOval(screenX(head.x) - 4.0, screenY(head.y) - 4.0, 8.0, 8.0);
+        gc.setLineWidth(1.0);
+    }
+
+    private void strokePhotonSegments(GraphicsContext gc, int visiblePoints) {
         Point3 previous = null;
         for (int i = 0; i < visiblePoints; i++) {
             Point3 point = photonPath.get(i);
@@ -603,10 +659,6 @@ public class BodySimulator extends Application {
             }
             previous = point;
         }
-
-        Point3 head = photonPath.get(visiblePoints - 1);
-        gc.setFill(Color.rgb(255, 255, 190));
-        gc.fillOval(screenX(head.x) - 4.0, screenY(head.y) - 4.0, 8.0, 8.0);
     }
 
     private void drawGravityGrid(GraphicsContext gc, double width, double height) {
@@ -680,7 +732,10 @@ public class BodySimulator extends Application {
         double invLen = 1.0 / Math.max(0.000001, Math.sqrt(vx * vx + vy * vy));
         vx *= invLen;
         vy *= invLen;
-        double impactOffset = Math.max(PHOTON_IMPACT_PARAMETER, blackHoleCaptureRadius(mass.get(0)) * 1.6);
+        double visibleMinSpan = Math.min(canvas.getWidth(), canvas.getHeight()) / viewScale;
+        double impactOffset = Math.max(
+                PHOTON_IMPACT_PARAMETER,
+                Math.min(blackHoleCaptureRadius(mass.get(0)) * 1.6, visibleMinSpan * 0.35));
         double aimX = targetX - vy * impactOffset;
         double aimY = targetY + vx * impactOffset;
         vx = aimX - x;
@@ -689,9 +744,19 @@ public class BodySimulator extends Application {
         vx *= invLen;
         vy *= invLen;
 
-        for (int step = 0; step < PHOTON_STEPS; step++) {
+        boolean hasBeenVisible = false;
+        int visibleSamples = 0;
+        for (int step = 0; step < PHOTON_MAX_STEPS; step++) {
             animatedPhotonPath.add(new Point3((float) x, (float) y, 0.0f));
-            if (isPhotonCapturedByBlackHole(x, y)) {
+            boolean visible = isPhotonInsideCanvas(x, y, 0.0);
+            hasBeenVisible |= visible;
+            if (visible) {
+                visibleSamples++;
+            }
+            if (step >= PHOTON_MIN_STEPS && hasBeenVisible && !isPhotonInsideCanvas(x, y, PHOTON_EXIT_MARGIN_PIXELS)) {
+                break;
+            }
+            if (hasBeenVisible && visibleSamples > 2 && isPhotonCapturedByBlackHole(x, y)) {
                 break;
             }
 
@@ -713,13 +778,15 @@ public class BodySimulator extends Application {
                 ay += deflection * transverseY / transverseLength;
             }
 
-            vx += ax * PHOTON_STEP_DISTANCE;
-            vy += ay * PHOTON_STEP_DISTANCE;
+            double curvature = Math.sqrt(ax * ax + ay * ay);
+            double stepDistance = Math.max(PHOTON_MIN_STEP_DISTANCE, PHOTON_STEP_DISTANCE / Math.max(1.0, curvature * 4.0));
+            vx += ax * stepDistance;
+            vy += ay * stepDistance;
             double speed = Math.max(0.000001, Math.sqrt(vx * vx + vy * vy));
             vx /= speed;
             vy /= speed;
-            x += vx * PHOTON_STEP_DISTANCE;
-            y += vy * PHOTON_STEP_DISTANCE;
+            x += vx * stepDistance;
+            y += vy * stepDistance;
         }
         photonPath.addAll(animatedPhotonPath);
         visiblePhotonPoints = Math.min(12, photonPath.size());
@@ -735,7 +802,7 @@ public class BodySimulator extends Application {
             double dx = photonX - posX.get(i);
             double dy = photonY - posY.get(i);
             double distance = Math.sqrt(dx * dx + dy * dy);
-            if (distance <= blackHoleCaptureRadius(bodyMass)) {
+            if (distance <= visiblePhotonCaptureRadius(bodyMass)) {
                 return true;
             }
         }
@@ -745,6 +812,20 @@ public class BodySimulator extends Application {
     private double blackHoleCaptureRadius(double bodyMass) {
         double schwarzschildRadius = 2.0 * G * bodyMass / (PHOTON_LIGHT_SPEED * PHOTON_LIGHT_SPEED);
         return Math.max(0.18, schwarzschildRadius * BLACK_HOLE_CAPTURE_RADIUS_MULTIPLIER);
+    }
+
+    private double visiblePhotonCaptureRadius(double bodyMass) {
+        double visibleMinSpan = Math.min(canvas.getWidth(), canvas.getHeight()) / viewScale;
+        return Math.min(blackHoleCaptureRadius(bodyMass), Math.max(0.18, visibleMinSpan * 0.18));
+    }
+
+    private boolean isPhotonInsideCanvas(double photonX, double photonY, double marginPixels) {
+        double sx = screenX((float) photonX);
+        double sy = screenY((float) photonY);
+        return sx >= -marginPixels
+                && sx <= canvas.getWidth() + marginPixels
+                && sy >= -marginPixels
+                && sy <= canvas.getHeight() + marginPixels;
     }
 
     private double[] farthestCanvasCornerFrom(double x, double y) {
