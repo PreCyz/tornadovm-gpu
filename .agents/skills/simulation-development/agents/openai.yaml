@@ -1,0 +1,4 @@
+interface:
+  display_name: "Simulation Development"
+  short_description: "Orchestrate physics and TornadoVM simulation work"
+  default_prompt: "Use $simulation-development to design or implement this simulation with staged specialist validation."
