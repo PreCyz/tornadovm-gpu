@@ -41,6 +41,9 @@ public class BodySimulator extends Application {
     private static final double GRID_STEP = 0.5;
     private static final double SPACE_BEND_SCALE = 0.025;
     private static final double SPACE_BEND_LIMIT = 70.0;
+    private static final double GRID_LATERAL_BEND_LIMIT = GRID_STEP * 2.0;
+    private static final double GRID_SEGMENT_MAX_LENGTH_FACTOR = 6.0;
+    private static final double GRID_SEGMENT_MIN_LIMIT_PIXELS = 48.0;
     private static final int PHOTON_MIN_STEPS = 900;
     private static final int PHOTON_MAX_STEPS = 60_000;
     private static final double PHOTON_STEP_DISTANCE = 0.08;
@@ -378,7 +381,7 @@ public class BodySimulator extends Application {
         running = false;
         int i = bodyCount++;
         names[i] = "Body " + bodyCount;
-        setBody(i, (i % 6 - 2) * 2.0f, (i / 6) * 2.0f, 0.0f, 0.0f, 0.65f + i * 0.03f, 0.0f, 10.0f);
+        setBody(i, (i % 6 - 2) * 2.0f, (i / 6f) * 2.0f, 0.0f, 0.0f, 0.65f + i * 0.03f, 0.0f, 10.0f);
         active.set(i, 1);
         state.set(0, bodyCount);
         snapshotInitialState();
@@ -878,7 +881,7 @@ public class BodySimulator extends Application {
             for (double y = worldBottom; y <= worldTop; y += GRID_STEP * 0.35) {
                 Point3 current = bentGridPoint(x, y);
                 if (previous != null) {
-                    strokeProjectedLine(gc, new Point3(previous.x, previous.y, (float) (previous.z / viewScale)),
+                    strokeProjectedGridLine(gc, new Point3(previous.x, previous.y, (float) (previous.z / viewScale)),
                             new Point3(current.x, current.y, (float) (current.z / viewScale)));
                 }
                 previous = current;
@@ -890,7 +893,7 @@ public class BodySimulator extends Application {
             for (double x = worldLeft; x <= worldRight; x += GRID_STEP * 0.35) {
                 Point3 current = bentGridPoint(x, y);
                 if (previous != null) {
-                    strokeProjectedLine(gc, new Point3(previous.x, previous.y, (float) (previous.z / viewScale)),
+                    strokeProjectedGridLine(gc, new Point3(previous.x, previous.y, (float) (previous.z / viewScale)),
                             new Point3(current.x, current.y, (float) (current.z / viewScale)));
                 }
                 previous = current;
@@ -914,6 +917,15 @@ public class BodySimulator extends Application {
             double slope = G * mass.get(i) / (distance * distance * distance);
             shiftX -= dx * slope * 0.00020;
             shiftY -= dy * slope * 0.00020;
+        }
+
+        double lateralShift = Math.hypot(shiftX, shiftY);
+        if (lateralShift > 0.0) {
+            double boundedShift = GRID_LATERAL_BEND_LIMIT
+                    * Math.tanh(lateralShift / GRID_LATERAL_BEND_LIMIT);
+            double bendScale = boundedShift / lateralShift;
+            shiftX *= bendScale;
+            shiftY *= bendScale;
         }
 
         double visualDepth = Math.max(-SPACE_BEND_LIMIT, potential * SPACE_BEND_SCALE);
@@ -1083,7 +1095,7 @@ public class BodySimulator extends Application {
 
     private double visiblePhotonCaptureRadius(double bodyMass) {
         double visibleMinSpan = Math.min(canvas.getWidth(), canvas.getHeight()) / viewScale;
-        return Math.min(blackHoleCaptureRadius(bodyMass), Math.max(0.18, visibleMinSpan * 0.18));
+        return Math.clamp(visibleMinSpan * 0.18, 0.18, blackHoleCaptureRadius(bodyMass));
     }
 
     private boolean isPhotonInsideCanvas(double photonX, double photonY, double marginPixels) {
@@ -1388,13 +1400,24 @@ public class BodySimulator extends Application {
     }
 
     private double bodyRadius(int i) {
-        return Math.max(8.0, Math.min(32.0, (3.0 + Math.cbrt(Math.max(0.0f, mass.get(i)))) * 2.0));
+        return Math.clamp((3.0 + Math.cbrt(Math.max(0.0f, mass.get(i)))) * 2.0, 8.0, 32.0);
     }
 
     private void strokeProjectedLine(GraphicsContext gc, Point3 from, Point3 to) {
         double[] fromScreen = projectPoint(from.x, from.y, from.z);
         double[] toScreen = projectPoint(to.x, to.y, to.z);
         gc.strokeLine(fromScreen[0], fromScreen[1], toScreen[0], toScreen[1]);
+    }
+
+    private void strokeProjectedGridLine(GraphicsContext gc, Point3 from, Point3 to) {
+        double[] fromScreen = projectPoint(from.x, from.y, from.z);
+        double[] toScreen = projectPoint(to.x, to.y, to.z);
+        double segmentLength = Math.hypot(toScreen[0] - fromScreen[0], toScreen[1] - fromScreen[1]);
+        double sampleLength = GRID_STEP * 0.35 * viewScale;
+        double maximumLength = Math.max(GRID_SEGMENT_MIN_LIMIT_PIXELS, sampleLength * GRID_SEGMENT_MAX_LENGTH_FACTOR);
+        if (Double.isFinite(segmentLength) && segmentLength <= maximumLength) {
+            gc.strokeLine(fromScreen[0], fromScreen[1], toScreen[0], toScreen[1]);
+        }
     }
 
     private double[] projectPoint(double x, double y, double z) {
