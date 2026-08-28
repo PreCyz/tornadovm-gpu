@@ -1153,26 +1153,46 @@ public class BodySimulator extends Application {
                 continue;
             }
             double centerX = posX.get(i);
-            double centerY = posY.get(i);
-            double centerZ = posZ.get(i);
-            double radius = schwarzschildRadius(mass.get(i));
-            gc.setStroke(colors[i].interpolate(Color.WHITE, 0.55).deriveColor(0.0, 1.0, 1.0, 0.85));
-            gc.beginPath();
-            for (int segment = 0; segment <= SCHWARZSCHILD_GUIDE_SEGMENTS; segment++) {
-                double angle = Math.PI * 2.0 * segment / SCHWARZSCHILD_GUIDE_SEGMENTS;
-                double[] projected = projectPoint(
-                        centerX + Math.cos(angle) * radius,
+        double centerY = posY.get(i);
+        double centerZ = posZ.get(i);
+        double radius = schwarzschildRadius(mass.get(i));
+        Color guideColor = colors[i].interpolate(Color.WHITE, 0.55).deriveColor(0.0, 1.0, 1.0, 0.85);
+        gc.setStroke(guideColor);
+        double labelX = Double.NaN;
+        double labelY = Double.NaN;
+        gc.beginPath();
+        for (int segment = 0; segment <= SCHWARZSCHILD_GUIDE_SEGMENTS; segment++) {
+            double angle = Math.PI * 2.0 * segment / SCHWARZSCHILD_GUIDE_SEGMENTS;
+            double[] projected = projectPoint(
+                    centerX + Math.cos(angle) * radius,
                         centerY + Math.sin(angle) * radius,
                         centerZ);
                 if (segment == 0) {
                     gc.moveTo(projected[0], projected[1]);
-                } else {
-                    gc.lineTo(projected[0], projected[1]);
-                }
+            } else {
+                gc.lineTo(projected[0], projected[1]);
             }
-            gc.closePath();
-            gc.stroke();
+            boolean labelFits = projected[0] >= 8.0 && projected[0] <= canvas.getWidth() - 100.0
+                    && projected[1] >= 18.0 && projected[1] <= canvas.getHeight() - 8.0;
+            if (labelFits && (Double.isNaN(labelY) || projected[1] < labelY)) {
+                labelX = projected[0];
+                labelY = projected[1];
+            }
         }
+        gc.closePath();
+        gc.stroke();
+        if (!Double.isNaN(labelY)) {
+            gc.setLineDashes();
+            gc.setFont(Font.font("Monospaced", 11));
+            gc.setTextAlign(TextAlignment.LEFT);
+            gc.setTextBaseline(VPos.BOTTOM);
+            gc.setFill(Color.rgb(4, 6, 12, 0.92));
+            gc.fillText("Event horizon", labelX + 7.0, labelY - 3.0);
+            gc.setFill(guideColor);
+            gc.fillText("Event horizon", labelX + 6.0, labelY - 4.0);
+            gc.setLineDashes(10.0, 7.0);
+        }
+    }
         gc.restore();
     }
 
