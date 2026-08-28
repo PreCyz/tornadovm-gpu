@@ -2,8 +2,7 @@ package pawg.body;
 
 import javafx.animation.AnimationTimer;
 import javafx.application.Application;
-import javafx.geometry.Insets;
-import javafx.geometry.Rectangle2D;
+import javafx.geometry.*;
 import javafx.scene.Scene;
 import javafx.scene.canvas.Canvas;
 import javafx.scene.canvas.GraphicsContext;
@@ -13,7 +12,6 @@ import javafx.scene.layout.*;
 import javafx.scene.paint.*;
 import javafx.scene.text.Font;
 import javafx.scene.text.TextAlignment;
-import javafx.geometry.VPos;
 import javafx.stage.Screen;
 import javafx.stage.Stage;
 import pawg.nbody.TornadoDeviceChoice;
@@ -36,6 +34,7 @@ public class BodySimulator extends Application {
     private static final float G = 100.0f;
     private static final float DT = 0.015f;
     private static final float SOFTENING = 25.0f;
+    private static final float CENTER_COLLISION_EPSILON = 0.5f;
     private static final double INITIAL_VIEW_SCALE = 45.0;
     private static final double MIN_VIEW_SCALE = 16.0;
     private static final double MAX_VIEW_SCALE = 180.0;
@@ -47,6 +46,16 @@ public class BodySimulator extends Application {
     private static final double PHOTON_STEP_DISTANCE = 0.08;
     private static final double PHOTON_MIN_STEP_DISTANCE = 0.012;
     private static final double PHOTON_LIGHT_SPEED = 160.0;
+    private static final double SI_LIGHT_SPEED = 299_792_458.0;
+    private static final double SI_GRAVITATIONAL_CONSTANT = 6.67430e-11;
+    private static final double SI_SECONDS_PER_SIMULATION_SECOND = 1.0;
+    private static final double METERS_PER_DISTANCE_UNIT =
+            SI_LIGHT_SPEED * SI_SECONDS_PER_SIMULATION_SECOND / PHOTON_LIGHT_SPEED;
+    private static final double KILOGRAMS_PER_MASS_UNIT =
+            G * METERS_PER_DISTANCE_UNIT * METERS_PER_DISTANCE_UNIT * METERS_PER_DISTANCE_UNIT
+                    / (SI_GRAVITATIONAL_CONSTANT
+                    * SI_SECONDS_PER_SIMULATION_SECOND * SI_SECONDS_PER_SIMULATION_SECOND);
+    private static final double SI_SOLAR_MASS_KILOGRAMS = 1.98847e30;
     private static final double BLACK_HOLE_MASS_THRESHOLD = 2_000.0;
     private static final double BLACK_HOLE_CAPTURE_RADIUS_MULTIPLIER = 1.0;
     private static final double PHOTON_BODY_RADIUS = 0.35;
@@ -54,6 +63,7 @@ public class BodySimulator extends Application {
     private static final double PHOTON_IMPACT_PARAMETER = 2.4;
     private static final double PHOTON_EXIT_MARGIN_PIXELS = 120.0;
     private static final double GRID_OVERSCAN_WORLD_RATIO = 0.45;
+    private static final int SCHWARZSCHILD_GUIDE_SEGMENTS = 192;
     private static final double CAMERA_PITCH_MIN = -Math.PI * 0.48;
     private static final double CAMERA_PITCH_MAX = Math.PI * 0.48;
     private static final double CAMERA_DRAG_SENSITIVITY = 0.006;
@@ -86,6 +96,8 @@ public class BodySimulator extends Application {
     private final float[] initialVelY = new float[MAX_BODIES];
     private final float[] initialVelZ = new float[MAX_BODIES];
     private final float[] initialMass = new float[MAX_BODIES];
+    private final String[] initialNames = new String[MAX_BODIES];
+    private final Color[] initialColors = new Color[MAX_BODIES];
     private final String[] names = new String[MAX_BODIES];
     private final Color[] colors = new Color[MAX_BODIES];
     private final TextField[] positionXFields = new TextField[MAX_BODIES];
@@ -116,6 +128,7 @@ public class BodySimulator extends Application {
     private boolean showTrails;
     private boolean showFullTracks;
     private boolean showOrbits;
+    private boolean showSchwarzschildRadii;
     private int draggedBodyIndex = -1;
     private double viewScale = INITIAL_VIEW_SCALE;
     private boolean photonAnimating;
@@ -131,6 +144,7 @@ public class BodySimulator extends Application {
     private double dragStartRoll;
     private boolean rotatingCamera;
     private boolean rotatingRoll;
+    private int mergedBodySequence;
 
     private record Point3(float x, float y, float z) {
     }
@@ -220,9 +234,17 @@ public class BodySimulator extends Application {
         applyControlCheckboxStyle(orbitBox);
         orbitBox.selectedProperty().addListener((_, _, selected) -> showOrbits = selected);
 
+        CheckBox schwarzschildRadiusBox = new CheckBox("Schwarzschild radius");
+        schwarzschildRadiusBox.setTooltip(new Tooltip("Show the event horizon of each black-hole body"));
+        applyControlCheckboxStyle(schwarzschildRadiusBox);
+        schwarzschildRadiusBox.selectedProperty().addListener((_, _, selected) -> {
+            showSchwarzschildRadii = selected;
+            draw();
+        });
+
         HBox deviceRow = new HBox(deviceCombo);
         HBox buttonRow = new HBox(8.0, addButton, startButton, resetButton, photonButton);
-        HBox checkboxRow = new HBox(12.0, trailsBox, fullTrackBox, orbitBox);
+        HBox checkboxRow = new HBox(12.0, trailsBox, fullTrackBox, orbitBox, schwarzschildRadiusBox);
         VBox controlsPane = new VBox(7.0, deviceRow, buttonRow, checkboxRow);
 
         editorList.setStyle("-fx-background-color: #10131c;");
@@ -257,7 +279,7 @@ public class BodySimulator extends Application {
         BorderPane root = new BorderPane(canvas, null, side, null, null);
         Scene scene = new Scene(root, bounds.getWidth(), bounds.getHeight(), Color.BLACK);
         stage.setTitle("GPU Body Simulator");
-        PhotonStageIcons.addPhotonIcon(stage);
+        BodyStageIcons.addBodyIcon(stage);
         stage.setScene(scene);
         stage.setX(bounds.getMinX());
         stage.setY(bounds.getMinY());
@@ -278,6 +300,7 @@ public class BodySimulator extends Application {
                     rebuildPlanIfNeeded();
                     TornadoExecutionResult result = executionPlan.execute();
                     result.transferToHost(posX, posY, posZ, velX, velY, velZ, accX, accY, accZ);
+                    resolveBodyCollisions();
                     if (showTrails && frame % 2 == 0) {
                         appendTrails();
                     }
@@ -385,6 +408,8 @@ public class BodySimulator extends Application {
             initialVelY[i] = velY.get(i);
             initialVelZ[i] = velZ.get(i);
             initialMass[i] = mass.get(i);
+            initialNames[i] = names[i];
+            initialColors[i] = colors[i];
         }
     }
 
@@ -405,6 +430,8 @@ public class BodySimulator extends Application {
             velY.set(i, initialVelY[i]);
             velZ.set(i, initialVelZ[i]);
             mass.set(i, initialMass[i]);
+            names[i] = initialNames[i];
+            colors[i] = initialColors[i];
             accX.set(i, 0.0f);
             accY.set(i, 0.0f);
             accZ.set(i, 0.0f);
@@ -417,6 +444,120 @@ public class BodySimulator extends Application {
         rebuildEditors();
         draw();
         updateDashboard();
+    }
+
+    private void resolveBodyCollisions() {
+        boolean mergedAny = false;
+        boolean mergedThisPass;
+        do {
+            mergedThisPass = false;
+            collisionSearch:
+            for (int i = 0; i < bodyCount; i++) {
+                if (active.get(i) == 0 || mass.get(i) <= 0.0f) {
+                    continue;
+                }
+                for (int j = i + 1; j < bodyCount; j++) {
+                    if (active.get(j) == 0 || mass.get(j) <= 0.0f) {
+                        continue;
+                    }
+                    float dx = posX.get(j) - posX.get(i);
+                    float dy = posY.get(j) - posY.get(i);
+                    float dz = posZ.get(j) - posZ.get(i);
+                    if (dx * dx + dy * dy + dz * dz
+                            <= CENTER_COLLISION_EPSILON * CENTER_COLLISION_EPSILON) {
+                        mergeBodies(i, j);
+                        mergedAny = true;
+                        mergedThisPass = true;
+                        break collisionSearch;
+                    }
+                }
+            }
+        } while (mergedThisPass);
+
+        if (mergedAny) {
+            state.set(0, bodyCount);
+            planDirty = true;
+            clearTrails();
+            clearFullTracks();
+            clearPhotonPath();
+            rebuildEditors();
+        }
+    }
+
+    private void mergeBodies(int survivor, int absorbed) {
+        float survivorMass = mass.get(survivor);
+        float absorbedMass = mass.get(absorbed);
+        float mergedMass = survivorMass + absorbedMass;
+        if (mergedMass <= 0.0f) {
+            removeBodySlot(absorbed);
+            return;
+        }
+
+        BodyCollision.State merged = BodyCollision.merge(
+                new BodyCollision.State(
+                        posX.get(survivor), posY.get(survivor), posZ.get(survivor),
+                        velX.get(survivor), velY.get(survivor), velZ.get(survivor), survivorMass),
+                new BodyCollision.State(
+                        posX.get(absorbed), posY.get(absorbed), posZ.get(absorbed),
+                        velX.get(absorbed), velY.get(absorbed), velZ.get(absorbed), absorbedMass));
+        Color mergedColor = colors[survivor].interpolate(colors[absorbed], absorbedMass / mergedMass);
+
+        posX.set(survivor, merged.x());
+        posY.set(survivor, merged.y());
+        posZ.set(survivor, merged.z());
+        velX.set(survivor, merged.vx());
+        velY.set(survivor, merged.vy());
+        velZ.set(survivor, merged.vz());
+        mass.set(survivor, merged.mass());
+        accX.set(survivor, 0.0f);
+        accY.set(survivor, 0.0f);
+        accZ.set(survivor, 0.0f);
+        nextAccX.set(survivor, 0.0f);
+        nextAccY.set(survivor, 0.0f);
+        nextAccZ.set(survivor, 0.0f);
+        active.set(survivor, 1);
+        names[survivor] = "Merged Body " + (++mergedBodySequence);
+        colors[survivor] = mergedColor;
+        removeBodySlot(absorbed);
+    }
+
+    private void removeBodySlot(int removedIndex) {
+        for (int source = removedIndex + 1; source < bodyCount; source++) {
+            copyBodySlot(source, source - 1);
+        }
+        clearBodySlot(bodyCount - 1);
+        bodyCount--;
+    }
+
+    private void copyBodySlot(int source, int target) {
+        posX.set(target, posX.get(source));
+        posY.set(target, posY.get(source));
+        posZ.set(target, posZ.get(source));
+        velX.set(target, velX.get(source));
+        velY.set(target, velY.get(source));
+        velZ.set(target, velZ.get(source));
+        accX.set(target, accX.get(source));
+        accY.set(target, accY.get(source));
+        accZ.set(target, accZ.get(source));
+        nextAccX.set(target, nextAccX.get(source));
+        nextAccY.set(target, nextAccY.get(source));
+        nextAccZ.set(target, nextAccZ.get(source));
+        mass.set(target, mass.get(source));
+        active.set(target, active.get(source));
+        names[target] = names[source];
+        colors[target] = colors[source];
+    }
+
+    private void clearBodySlot(int index) {
+        setBody(index, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f);
+        accX.set(index, 0.0f);
+        accY.set(index, 0.0f);
+        accZ.set(index, 0.0f);
+        nextAccX.set(index, 0.0f);
+        nextAccY.set(index, 0.0f);
+        nextAccZ.set(index, 0.0f);
+        active.set(index, 0);
+        names[index] = null;
     }
 
     private void rebuildEditors() {
@@ -602,6 +743,10 @@ public class BodySimulator extends Application {
         gc.setFill(Color.rgb(4, 6, 12));
         gc.fillRect(0, 0, width, height);
         drawGravityGrid(gc, width, height);
+
+        if (showSchwarzschildRadii) {
+            drawSchwarzschildRadii(gc);
+        }
 
         if (showOrbits) {
             drawStableOrbitGuides(gc);
@@ -999,6 +1144,38 @@ public class BodySimulator extends Application {
         };
     }
 
+    private void drawSchwarzschildRadii(GraphicsContext gc) {
+        gc.save();
+        gc.setLineWidth(1.5);
+        gc.setLineDashes(10.0, 7.0);
+        for (int i = 0; i < bodyCount; i++) {
+            if (mass.get(i) < BLACK_HOLE_MASS_THRESHOLD) {
+                continue;
+            }
+            double centerX = posX.get(i);
+            double centerY = posY.get(i);
+            double centerZ = posZ.get(i);
+            double radius = schwarzschildRadius(mass.get(i));
+            gc.setStroke(colors[i].interpolate(Color.WHITE, 0.55).deriveColor(0.0, 1.0, 1.0, 0.85));
+            gc.beginPath();
+            for (int segment = 0; segment <= SCHWARZSCHILD_GUIDE_SEGMENTS; segment++) {
+                double angle = Math.PI * 2.0 * segment / SCHWARZSCHILD_GUIDE_SEGMENTS;
+                double[] projected = projectPoint(
+                        centerX + Math.cos(angle) * radius,
+                        centerY + Math.sin(angle) * radius,
+                        centerZ);
+                if (segment == 0) {
+                    gc.moveTo(projected[0], projected[1]);
+                } else {
+                    gc.lineTo(projected[0], projected[1]);
+                }
+            }
+            gc.closePath();
+            gc.stroke();
+        }
+        gc.restore();
+    }
+
     private void drawStableOrbitGuides(GraphicsContext gc) {
         int center = dominantBodyIndex();
         if (center < 0) {
@@ -1047,6 +1224,22 @@ public class BodySimulator extends Application {
 
     private void updateDashboard() {
         dashboard.getChildren().clear();
+        Label unitsHeader = new Label("Unit calibration");
+        unitsHeader.setStyle("-fx-text-fill: #9ecfff; -fx-font-size: 12px; -fx-font-weight: bold;");
+        dashboard.getChildren().add(unitsHeader);
+
+        Label unitsExplanation = new Label(String.format(
+                "Assuming 1 simulation second = %.0f SI second and photon speed = c: "
+                        + "1 du = %.4e m (%.3f km), 1 mu = %.4e kg (%.4f solar masses). "
+                        + "This calibration follows from G = %.1f du3/(mu*s2); changing the simulation-time calibration changes both SI conversions.",
+                SI_SECONDS_PER_SIMULATION_SECOND,
+                METERS_PER_DISTANCE_UNIT, METERS_PER_DISTANCE_UNIT / 1_000.0,
+                KILOGRAMS_PER_MASS_UNIT, KILOGRAMS_PER_MASS_UNIT / SI_SOLAR_MASS_KILOGRAMS,
+                G));
+        unitsExplanation.setWrapText(true);
+        unitsExplanation.setStyle("-fx-text-fill: #c7d6eb; -fx-font-size: 11px;");
+        dashboard.getChildren().add(unitsExplanation);
+
         if (bodyCount == 0) {
             Label empty = new Label("Empty space");
             empty.setStyle("-fx-text-fill: #96a2bc;");
