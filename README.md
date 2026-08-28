@@ -1,271 +1,213 @@
-# TornadoVM GPU JavaFX Demos
+# TornadoVM GPU JavaFX Simulations
 
-JavaFX simulation demos accelerated with TornadoVM. The application renders interactive pixel-based simulations in JavaFX while TornadoVM task graphs execute the compute-heavy kernels on an accelerated device when TornadoVM is configured.
+This project is a collection of interactive physics and cellular-automata demos written in Java 25. JavaFX owns the user interface and rendering, while TornadoVM moves suitable data-parallel calculations to an OpenCL-capable accelerator. The repository also contains a CPU n-body implementation that acts as a readable reference for the accelerated gravity simulations.
 
-The launcher currently supports:
+The important design boundary is:
 
-- Conway's Game of Life, launched by default.
-- Heat distribution with temporary mouse-injected heat sources.
-- Heat distribution with permanent heater sources.
-- Solar eclipse rendering with configurable animation duration and coverage.
-- Earth orbit and full Solar System GPU renderers.
-- CPU and GPU n-body gravity simulators with interactive body creation.
+- **CPU / JavaFX:** input, animation scheduling, scene-graph updates, dashboards, collision orchestration, and other irregular control flow.
+- **GPU / TornadoVM:** large independent loops such as grid updates, pairwise force accumulation, integration, projection, and per-pixel rendering.
+- **Transfers:** primitive arrays and TornadoVM arrays cross the device boundary deliberately. Transfers and synchronization are part of the performance cost and should be measured.
 
-## Demos
+## Available demos
 
-### Game of Life
+`pawg.Launcher` selects a demo from the first command-line argument.
 
-The default launch mode runs an interactive Conway's Game of Life simulation on a 1200 x 880 grid. The grid starts with a random pattern, and mouse clicks or drags make cells alive using a small brush.
+| Argument | Demo | What it shows | Main compute path |
+| --- | --- | --- | --- |
+| none or `0` | Game of Life | Interactive 1200 x 880 toroidal cellular automaton | TornadoVM grid kernel |
+| `1` | Temporary heat sources | 2D finite-difference heat diffusion; drag to inject heat | TornadoVM grid kernel |
+| `2` | Permanent heaters | Heat diffusion with mouse-created fixed-temperature sources | TornadoVM grid kernel |
+| `3 [seconds] [coverage]` | Solar eclipse | Animated Sun, Moon, corona, and sky rendering | TornadoVM per-pixel kernel |
+| `4` | Earth orbit | Earth, atmosphere, orbit trace, and space background | TornadoVM per-pixel kernel |
+| `5` | Solar System | Sun, eight planets, rings, orbits, and animated surfaces | TornadoVM per-pixel kernel |
+| `6` | CPU gravity | Interactive n-body simulation with trails and body creation | CPU pairwise forces and Verlet integration |
+| `7` | GPU gravity | Interactive n-body simulation, dashboard, editable bodies, and camera rotation | TornadoVM force, integration, and projection kernels |
+| `8` | GPU body simulator | Editable bodies, stable-orbit tools, photons, black-hole capture, trails, and a curved gravity grid | TornadoVM simulation with JavaFX visualization |
 
-The simulation uses toroidal wrapping at the grid edges, so cells at one edge treat cells on the opposite edge as neighbors.
-
-### Heat Distribution
-
-`HeatDistributionFX` simulates two-dimensional heat diffusion on a 512 x 512 grid. It starts with a circular heat source in the center of the grid and repeatedly applies a finite-difference heat equation:
+The heat equation uses the five-point stencil:
 
 ```text
 next = current + alpha * (top + bottom + left + right - 4 * current)
 ```
 
-The visualization maps temperature to a color gradient from black through blue and red to yellow/white. Holding or dragging the mouse injects temporary heat into the simulation, so you can add new hot spots and watch them diffuse over time.
-
-The simulator uses double buffering (`gridA` and `gridB`) and executes multiple simulation steps per rendered frame for smoother motion.
-
-### Heat Distribution With Constant Heaters
-
-`HeatDistributionConstantHeatersFX` uses the same heat diffusion model, but mouse interaction places permanent heater sources. These heaters are held at 100 degrees before each simulation step, so they continue warming the grid instead of fading away.
-
-The demo starts with one permanent heater in the center of the grid. Holding or dragging the mouse adds more heater sources.
-
-### Solar Eclipse
-
-`SolarEclipseFX` renders an animated solar eclipse on an 800 x 600 canvas. A TornadoVM kernel computes the Sun, Moon, corona, and sky colors for each pixel.
-
-The eclipse animation accepts a duration in seconds and a maximum coverage percentage. Clicking the image resets the animation timer.
-
-### Gravity And Orbital Demos
-
-`EarthOrbitGPU` renders a focused Earth-orbit scene on an 800 x 800 canvas. A TornadoVM kernel computes the Sun glow, Earth disk, rotating land/ocean pattern, atmosphere, orbit trace, and space background for each pixel.
-
-`SolarSystemGPU` extends that GPU-rendered approach to an 880 x 880 full Solar System view. It renders the Sun glow, all eight planets, subtle orbit lines, Earth land rotation, Jupiter atmospheric bands, and Saturn rings while the JavaFX animation loop updates each planet with a different orbital speed.
-
-`GravitySystemCPU` and `GravityGPU` are interactive n-body gravity simulators. They start with a Sun and planets initialized from Kepler-style circular orbit velocities, compensate the Sun's momentum, draw trails, and expose a side dashboard with mass, radius, distance, velocity, acceleration, and nearest-body details. Mouse interaction creates custom bodies in two steps: drag to size the mass, then click to choose the initial velocity vector. The GPU version also has editable custom-body fields and a `ROTATE` popup for setting camera X/Y/Z rotation directly. The CPU version uses pairwise force accumulation with Verlet integration; the GPU version runs force calculation, motion integration, and projection through TornadoVM kernels over fixed-size body arrays.
+The gravity demos initialize circular orbits from Kepler-style velocities and compensate the central body's momentum. They are educational simulations rather than high-precision ephemeris software.
 
 ## Requirements
 
+- Windows 10 or 11 (the checked-in launcher script and packaged JavaFX natives are Windows-specific)
 - JDK 25
-- Maven
-- JavaFX 25
-- ControlsFX 11.2.4
-- TornadoVM 5.2.0 for JDK 25
-- `TORNADOVM_HOME` set to a valid TornadoVM installation
+- Maven Daemon (`mvnd`) or Apache Maven (`mvn`)
+- TornadoVM 5.2.0 built for JDK 25 with an available OpenCL backend/device
+- PowerShell 7 (`pwsh`) when using `run.ps1`
 
-The Maven configuration passes TornadoVM runtime options through the JavaFX Maven plugin.
+JavaFX 25.0.2, ControlsFX 11.2.4, TornadoVM 5.2.0-jdk25, and JUnit 6.1.3 are resolved by Maven.
 
-## Running
+Set the environment before building. Replace the example paths with your installation paths:
 
-### Windows PowerShell Launcher
+```powershell
+$env:JAVA_HOME = 'C:\Install\Java\jdk-25.0.2'
+$env:TORNADOVM_HOME = 'C:\Install\Java\tornadovm-5.2.0-jdk25-opencl'
+$env:PATH = "$env:JAVA_HOME\bin;$env:TORNADOVM_HOME\bin;$env:PATH"
 
-On Windows, use `run.ps1` to launch the demos through TornadoVM directly. The script sets the TornadoVM and JDK environment variables for the current session, builds the JavaFX classpath, and passes all script arguments to `pawg.Launcher`.
+java --version
+tornado --devices
+```
 
-Use the latest stable version of PowerShell (`pwsh`) rather than legacy Windows PowerShell. Newer `pwsh` releases handle modern command-line parsing and script execution more consistently.
+The Maven JavaFX configuration reads `TORNADOVM_HOME/bin/tornado-argfile`; a missing or incorrect variable causes the application launch to fail before a demo starts.
+
+## Build and test
+
+Use Maven Daemon when it is installed. Substitute `mvn` for `mvnd` in all examples if necessary.
+
+```powershell
+mvnd verify
+```
+
+`verify` compiles the application and runs all unit tests. Useful development commands are:
+
+```powershell
+mvnd test
+mvnd '-Dtest=BodySimulatorGridRenderingTest' test
+mvnd package
+```
+
+Avoid adding `clean` to every development command: a running JavaFX process or IDE can hold files in `target`. Use `mvnd clean verify` when a genuinely clean build is needed, after closing running instances.
+
+## Run during development
+
+### Maven JavaFX launcher
 
 Run the default Game of Life demo:
 
 ```powershell
-pwsh -File .\run.ps1
+mvnd javafx:run
 ```
 
-Run the temporary heat distribution demo:
+Pass the launcher argument through `javafx.args` to select another demo:
 
 ```powershell
-pwsh -File .\run.ps1 1
+mvnd javafx:run '-Djavafx.args=8'
+mvnd javafx:run '-Djavafx.args=3 12 100'
 ```
 
-Run the permanent-heater heat distribution demo:
+The second eclipse argument is its duration in seconds; the third is maximum coverage as a percentage.
+
+### Repository PowerShell launcher
+
+`run.ps1` launches compiled classes through the TornadoVM command. Build at least once, then run:
 
 ```powershell
-pwsh -File .\run.ps1 2
+mvnd package
+pwsh -File .\run.ps1 8
 ```
 
-Run the solar eclipse demo. The second argument is animation duration in seconds, and the third argument is maximum coverage percent:
+Before using the script on another machine, edit its local `TORNADO_HOME`, `TORNADO_SDK`, `JAVA_HOME`, and Maven-repository paths. They currently describe the original developer machine and are not auto-discovered.
+
+If local script execution is blocked, allow only this invocation:
 
 ```powershell
-pwsh -File .\run.ps1 3 12 100
+pwsh -ExecutionPolicy Bypass -File .\run.ps1 8
 ```
 
-Run the GPU-rendered Solar System demo:
+## TornadoVM device selection
+
+GPU-backed demos normally show a device-selection dialog populated from `tornado --devices`. For automated tests, profiling, or an unattended startup, select TornadoVM's default device:
 
 ```powershell
-pwsh -File .\run.ps1 5
+$env:EXTRA_JVM_FLAGS = '-Dtornado.device.selector.default=true'
+pwsh -File .\run.ps1 8
 ```
 
-Run the CPU n-body gravity simulator:
+Device choice matters: a parallel loop is not automatically faster on a GPU once compilation, transfer, synchronization, and rendering costs are included.
+
+## Run the packaged artifact
+
+Create the shaded application JAR:
 
 ```powershell
-pwsh -File .\run.ps1 6
+mvnd clean package
 ```
 
-Run the GPU n-body gravity simulator:
+The runnable artifact is:
+
+```text
+target/tornadovm-gpu-1.0-SNAPSHOT.jar
+```
+
+Run it with TornadoVM so the required runtime configuration is installed. This example starts demo 8 and skips the device dialog:
 
 ```powershell
+$artifact = (Resolve-Path '.\target\tornadovm-gpu-1.0-SNAPSHOT.jar').Path
+$jvmFlags = '--enable-native-access=ALL-UNNAMED --add-opens=java.base/java.lang=ALL-UNNAMED -Dprism.verbose=false -Dtornado.device.selector.default=true'
+
+tornado --jvm="$jvmFlags" --cp $artifact pawg.Launcher 8
+```
+
+Remove `-Dtornado.device.selector.default=true` to choose the accelerator interactively. Change the last argument using the demo table above.
+
+Although the shaded JAR has `pawg.Launcher` in its manifest, the supported command is the TornadoVM launcher shown above rather than plain `java -jar`: TornadoVM supplies required JVM/module/runtime settings. The shaded JAR includes the project's Java dependencies and Windows JavaFX native libraries, but it does **not** replace the matching JDK, TornadoVM installation, or accelerator driver on the destination machine. `original-tornadovm-gpu-1.0-SNAPSHOT.jar` is the unshaded intermediate JAR and is not the distributable artifact.
+
+## Project structure
+
+```text
+src/main/java/pawg/
+|-- Launcher.java             demo selection
+|-- gameoflife/               cellular automaton
+|-- heatdistribution/         diffusion simulations
+|-- eclipse/                  eclipse renderer
+|-- gravity/                  CPU/GPU gravity applications
+|-- nbody/                    Earth and Solar System renderers
+`-- body/                     interactive GPU body simulator
+
+src/test/java/                unit, numerical, rendering, and parity tests
+.agents/                      project-specific Codex workflow and skills
+pom.xml                       Java, JavaFX, TornadoVM, test, and shade configuration
+run.ps1                       local Windows/TornadoVM development launcher
+```
+
+## Implementing a change
+
+1. **State the model first.** Record the governing laws, units, assumptions, numerical method, invariants, and acceptable error before changing a physics kernel.
+2. **Keep a correctness oracle.** Implement or preserve a deterministic CPU calculation for numerical checks. Compare GPU output with tolerances appropriate to floating-point order and precision.
+3. **Partition intentionally.** Put regular, high-volume, independent calculations on TornadoVM. Keep JavaFX scene-graph mutation, UI state, allocation-heavy work, and irregular orchestration on the CPU.
+4. **Use kernel-friendly data.** Prefer primitive/TornadoVM arrays, indexed loops, and `@Parallel`; keep object graphs, JavaFX types, streams, recursion, synchronization, and exception-driven flow outside kernels.
+5. **Make transfers explicit.** Define `TaskGraph` inputs/outputs and transfer modes deliberately. Avoid per-frame full-state readback unless CPU behavior or visualization actually needs it.
+6. **Protect the JavaFX thread.** TornadoVM execution and expensive CPU work must not block scene-graph mutation. Only update JavaFX nodes on the JavaFX Application Thread.
+7. **Test in layers.** Add unit tests for equations and edge cases, CPU/GPU parity tests for kernels, and focused rendering/interaction tests where presentation has meaningful logic.
+8. **Run quality gates.** Finish with `mvnd verify`; inspect compiler and static-analysis findings, clean only issues that improve correctness or maintainability, then rerun the tests after cleanup.
+
+For substantial simulation work, follow [AGENTS.md](AGENTS.md) and the project workflow in `.agents/skills/simulation-development/`. The intended sequence is physics definition, independent physics/math validation, documented CPU/GPU partition, implementation, tests, worthwhile cleanup, independent retest, and finally release preparation.
+
+## GravityGPU tuning and profiling
+
+`GravityGPU` exposes JVM system properties for controlling device-to-host synchronization and diagnosing slow frames:
+
+| Property | Default | Purpose |
+| --- | ---: | --- |
+| `gravitygpu.adaptive.readback.enabled` | `true` | Uses a fixed conservative render-readback interval for the run |
+| `gravitygpu.adaptive.render.readback.max` | `4` | Render-readback interval in adaptive mode |
+| `gravitygpu.render.readback.interval` | `2` | Fixed render interval when adaptive mode is disabled |
+| `gravitygpu.state.readback.interval` | `30` | Full physical-state readback interval; never below the render interval |
+| `gravitygpu.framebudget.skip.enabled` | `true` | Allows an optional snapshot to be skipped after an over-budget frame |
+| `gravitygpu.framebudget.skip.ms` | `16.0` | Frame-budget threshold in milliseconds |
+| `gravitygpu.orbit.guide.segments` | `96` | Segments per dynamic orbit guide; minimum 24 |
+| `gravitygpu.timing` | `false` | Enables execute, state-sync, dashboard, and draw timing logs |
+| `gravitygpu.timing.slow.ms` | `24.0` | Slow-frame logging threshold |
+| `gravitygpu.timing.summary.frames` | `300` | Timing-summary interval |
+
+Example profiling run:
+
+```powershell
+$env:EXTRA_JVM_FLAGS = '-Dtornado.device.selector.default=true -Dgravitygpu.timing=true -Dgravitygpu.timing.slow.ms=16 -Dgravitygpu.timing.summary.frames=300'
 pwsh -File .\run.ps1 7
 ```
 
-### TornadoVM Device Selection
+When custom bodies or collision experiments require fresher CPU-side state, reduce `gravitygpu.state.readback.interval`. When orbit guides are visible, the application intentionally synchronizes position and velocity at the render cadence so guides reflect perturbations.
 
-Every TornadoVM-backed demo shows a ControlsFX device-selection dialog before the simulation starts. The dialog is populated from:
+## Troubleshooting
 
-```powershell
-tornado --devices
-```
-
-The popup shows the concise command output first and has an on-demand details panel for extra Tornado API information such as memory limits, platform, backend, workgroup dimensions, and OpenCL C version.
-
-For unattended profiling or scripted runs, skip the popup and use TornadoVM's default device:
-
-```powershell
-$env:EXTRA_JVM_FLAGS = "-Dtornado.device.selector.default=true"
-pwsh -File .\run.ps1 7
-```
-
-This flag applies to Game of Life, heat distribution, solar eclipse, Earth orbit, Solar System, and `GravityGPU`.
-
-### GravityGPU Runtime Flags
-
-Tune `GravityGPU` readback pacing with JVM system properties. These flags are useful when the GPU computation is quick overall, but TornadoVM/OpenCL execution or host synchronization occasionally causes visible pauses.
-
-- `gravitygpu.render.readback.interval` controls how often `GravityGPU` executes the main Tornado simulation/projection graph and reads projected screen coordinates back to JavaFX when adaptive readback is disabled. The default fixed value is `2`, unless `gravitygpu.readback.interval` is set, in which case that older flag is used as the default value. Lower values update rendered positions more often, but can increase GPU/host synchronization cost.
-- `gravitygpu.state.readback.interval` controls how often `GravityGPU` explicitly reads full physical positions (`posX`, `posY`, `posZ`) back from the device. The default is `30`, and it is clamped so it can never be lower than the active render readback interval. Higher values reduce large device-to-host transfers, but CPU-side collision checks and dashboard metrics see the physical state less often.
-- `gravitygpu.readback.interval` is the older compatibility flag. Prefer `gravitygpu.render.readback.interval` for new runs.
-- `gravitygpu.adaptive.readback.enabled` enables conservative readback pacing. The default is `true`. In this mode `GravityGPU` builds the Tornado task graph once at `gravitygpu.adaptive.render.readback.max` and keeps that interval fixed for the run, avoiding mid-animation task-graph rebuilds and the compile pauses they can cause. Set it to `false` to use the fixed `gravitygpu.render.readback.interval` value instead.
-- `gravitygpu.adaptive.render.readback.max` sets the fixed render readback interval used when adaptive readback is enabled. The default is `4`.
-- `gravitygpu.framebudget.skip.enabled` allows `GravityGPU` to skip the next optional simulation/render snapshot after an over-budget frame. The default is `true`. Forced sync frames, collision-check frames, and orbit-guide frames are not skipped.
-- `gravitygpu.framebudget.skip.ms` sets the over-budget threshold used by optional snapshot skipping. The default is `16.0`.
-- Static JavaFX overlays such as the habitable zone, asteroid belt, and weak Sun gravity boundary are cached until their inputs change, for example when the camera moves, the canvas size changes, bodies are reset, or a related checkbox changes.
-- `gravitygpu.orbit.guide.segments` controls how many line segments are used per dynamic orbit guide. The default is `96`, with a minimum of `24`. Lower values reduce JavaFX path rasterization work while `Show orbits` is enabled.
-- `gravitygpu.timing` enables per-frame diagnostic logging. The default is `false`.
-- `gravitygpu.timing.slow.ms` sets the slow-frame threshold used by timing logs. The default is `24.0`.
-- `gravitygpu.timing.summary.frames` controls how often average/max timing summaries are printed. The default is `300`.
-
-The `GravityGPU` dashboard is populated immediately after startup and refreshes after full state readbacks when the dashboard update interval has elapsed. It no longer depends on the full-state sync frame landing on an exact frame-number multiple, so planet and custom-body details should remain visible even with conservative GPU readback pacing.
-
-The `ROTATE` button opens a camera-rotation dialog. Values are entered in degrees: `X` maps to pitch, `Y` maps to yaw, and `Z` maps to roll. Out-of-range values are clamped to the supported bounds before being applied. The rotation is used consistently by JavaFX overlay drawing, TornadoVM body projection, trail projection, and the axis widget.
-
-When `Show orbits` is enabled in `GravityGPU`, the orbit guides are drawn dynamically from the current synced position and velocity instead of being snapshotted into the static overlay cache, so they can change when another body perturbs a planet without forcing an expensive cached-image rebuild every frame. This intentionally forces full state and velocity sync at the render readback cadence while orbit guides are visible. `Align planets on reset` also refreshes CPU-side projection state before rebuilding the static overlays, so the habitable zone, asteroid belt, and weak-gravity indicator stay centered after reset.
-
-When `gravitygpu.timing=true`, slow-frame logs include separate `execute`, `stateSync`, `dashboard`, and JavaFX draw timings. `execute` measures `executionPlan.execute()`, while `stateSync` measures explicit full position/velocity `transferToHost(...)`. The same line also reports the active render `interval`, whether the optional simulation snapshot was skipped as `skippedSim`, and whether static overlays were rebuilt.
-
-For a stable Solar System without custom bodies, the current default strategy is conservative fixed readback at interval `4`:
-
-```powershell
-$env:EXTRA_JVM_FLAGS = "-Dgravitygpu.adaptive.readback.enabled=true -Dgravitygpu.adaptive.render.readback.max=4 -Dgravitygpu.state.readback.interval=30"
-pwsh -File .\run.ps1 7
-```
-
-For lower render latency, disable adaptive readback and choose a fixed render interval directly:
-
-```powershell
-$env:EXTRA_JVM_FLAGS = "-Dgravitygpu.adaptive.readback.enabled=false -Dgravitygpu.render.readback.interval=2 -Dgravitygpu.state.readback.interval=30"
-pwsh -File .\run.ps1 7
-```
-
-When adding custom bodies or testing collisions, reduce the full state interval so CPU-side collision handling observes the simulation more frequently:
-
-```powershell
-$env:EXTRA_JVM_FLAGS = "-Dgravitygpu.adaptive.readback.enabled=false -Dgravitygpu.render.readback.interval=2 -Dgravitygpu.state.readback.interval=6"
-pwsh -File .\run.ps1 7
-```
-
-For profiling, enable timing logs and skip the device popup:
-
-```powershell
-$env:EXTRA_JVM_FLAGS = "-Dtornado.device.selector.default=true -Dgravitygpu.timing=true -Dgravitygpu.timing.slow.ms=16 -Dgravitygpu.timing.summary.frames=300"
-pwsh -File .\run.ps1 7
-```
-
-For JVM and GC profiling, add standard JDK diagnostics:
-
-```powershell
-$env:EXTRA_JVM_FLAGS = "-Dtornado.device.selector.default=true -Dgravitygpu.timing=true -Dgravitygpu.timing.slow.ms=16 -Xlog:gc*,safepoint:file=profile-gc-safepoint.log:tags,uptime,time,level -XX:StartFlightRecording=filename=profile-gravitygpu.jfr,settings=profile,dumponexit=true"
-pwsh -File .\run.ps1 7
-```
-
-Recent profiling after the dashboard and camera-rotation changes showed that the dashboard is not the slow-frame bottleneck. In that run, slow frames were still dominated mainly by TornadoVM/OpenCL `execute` stalls, with smaller `stateSync` and occasional JavaFX overlay-draw spikes. GC pauses were short compared with the largest execution stalls.
-
-If PowerShell blocks local script execution, run it for the current command only:
-
-```powershell
-pwsh -ExecutionPolicy Bypass -File .\run.ps1
-```
-
-Before using the script on another machine, update the local paths inside `run.ps1` for `TORNADO_HOME`, `TORNADO_SDK`, `JAVA_HOME`, and the local Maven JavaFX repository if they differ.
-
-### Maven
-
-Run the default Game of Life demo with no launcher arguments:
-
-```bash
-mvn clean javafx:run
-```
-
-Run the temporary heat distribution demo:
-
-```bash
-mvn clean javafx:run -Djavafx.args=1
-```
-
-Run the permanent-heater heat distribution demo:
-
-```bash
-mvn clean javafx:run -Djavafx.args=2
-```
-
-Run the solar eclipse demo. The second argument is animation duration in seconds, and the third argument is maximum coverage percent:
-
-```bash
-mvn clean javafx:run -Djavafx.args="3 12 100"
-```
-
-Run the GPU-rendered Solar System demo:
-
-```bash
-mvn clean javafx:run -Djavafx.args=5
-```
-
-Run the CPU n-body gravity simulator:
-
-```bash
-mvn clean javafx:run -Djavafx.args=6
-```
-
-Run the GPU n-body gravity simulator:
-
-```bash
-mvn clean javafx:run -Djavafx.args=7
-```
-
-The launcher is `pawg.Launcher`:
-
-- No arguments: `GameOfLifeInteractive`
-- `1`: `HeatDistributionFX`
-- `2`: `HeatDistributionConstantHeatersFX`
-- `3 <durationSeconds> <coveragePercent>`: `SolarEclipseFX`
-- `4`: `EarthOrbitGPU`
-- `5`: `SolarSystemGPU`
-- `6`: `GravitySystemCPU`
-- `7`: `GravityGPU`
-
-## Packaging
-
-Build the shaded JAR:
-
-```bash
-mvn clean package
-```
-
-The shaded JAR manifest points to `pawg.Launcher`.
-
-## Repository Notes
-
-Generated build output and local IDE metadata are intentionally not tracked. The `.gitignore` excludes Maven `target/`, Gradle-style `build/`, Kotlin metadata, and project files for IntelliJ IDEA, Eclipse, NetBeans, VS Code, and macOS.
+- **`tornado-argfile` is missing:** verify `$env:TORNADOVM_HOME` and confirm `Test-Path "$env:TORNADOVM_HOME\bin\tornado-argfile"`.
+- **No accelerator appears:** run `tornado --devices` and verify the OpenCL/CUDA driver and the TornadoVM backend installation.
+- **`run.ps1` cannot find JavaFX classes:** run `mvnd package` first and update the script's hard-coded Maven-repository paths.
+- **A clean build cannot delete `target`:** close the running application and any process holding the JAR/classes, then retry.
+- **GPU output differs slightly from CPU output:** compare with an explicit numerical tolerance; floating-point reduction order can differ. Large, unstable, or non-finite differences are failures, not expected GPU noise.

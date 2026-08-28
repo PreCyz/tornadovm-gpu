@@ -23,10 +23,14 @@ import uk.ac.manchester.tornado.api.enums.DataTransferMode;
 import uk.ac.manchester.tornado.api.types.arrays.FloatArray;
 import uk.ac.manchester.tornado.api.types.arrays.IntArray;
 
+import java.util.List;
+
 public class GravityGPU extends Application {
 
     private static final int CANVAS_WIDTH = 1250;
     private static final int SIDEBAR_WIDTH = 430;
+    private static final double SIDEBAR_PADDING = 15.0;
+    private static final double DEVICE_COMBO_RIGHT_GAP = 15.0;
     private static final int HEIGHT = 880;
     private static final int MAX_BODIES = 1024;
 
@@ -207,6 +211,7 @@ public class GravityGPU extends Application {
 
     private TornadoExecutionPlan executionPlan;
     private TornadoExecutionPlan trailProjectionPlan;
+    private TornadoDeviceChoice selectedDeviceChoice;
     private TornadoDevice selectedTornadoDevice;
     private boolean simulationPlanDirty = false;
     private boolean simulationPlanReady = false;
@@ -402,7 +407,7 @@ public class GravityGPU extends Application {
         dashboardParams.set(2, accelerationToMetersPerSecondSquared(1.0f));
 
         resetSystem();
-        chooseTornadoDevice(primaryStage);
+        ComboBox<TornadoDeviceChoice> deviceCombo = createDeviceCombo(primaryStage);
         initTornadoPlanOnce();
         warmUpTornadoPlans();
 
@@ -426,6 +431,8 @@ public class GravityGPU extends Application {
 
         Label title = new Label("Dashboard");
         title.setStyle("-fx-text-fill: #00ff88; -fx-font-weight: bold; -fx-font-size: 13px;");
+
+        HBox deviceRow = new HBox(deviceCombo);
 
         Button btnReset = new Button("RESET (SPACE)");
         btnReset.setStyle("-fx-background-color: #222; -fx-text-fill: #ff4444; -fx-border-color: #ff4444; -fx-font-weight: bold; -fx-cursor: hand;");
@@ -527,7 +534,7 @@ public class GravityGPU extends Application {
                 Nearest = closest body and distance [AU]""");
         legend.setStyle("-fx-text-fill: #b8b8c8; -fx-font-family: monospace; -fx-font-size: 11px; -fx-padding: 0 0 6 0;");
 
-        sidebar.getChildren().addAll(title, resetRow, optionsGrid, legend, dashboardList);
+        sidebar.getChildren().addAll(title, deviceRow, resetRow, optionsGrid, legend, dashboardList);
         computeDashboardMetricsOnCpu();
         updateDashboard();
 
@@ -1779,20 +1786,29 @@ public class GravityGPU extends Application {
     private void initTornadoPlanOnce() {
         closeExecutionPlan();
 
-        executionPlan = createNBodyExecutionPlan(currentRenderReadbackIntervalFrames);
-        simulationPlanReady = true;
-        simulationPlanDirty = false;
+        TornadoExecutionPlan nextExecutionPlan = null;
+        TornadoExecutionPlan nextTrailProjectionPlan = null;
+        try {
+            nextExecutionPlan = createNBodyExecutionPlan(currentRenderReadbackIntervalFrames);
+            TaskGraph trailTaskGraph = new TaskGraph("trailProjection")
+                    .transferToDevice(DataTransferMode.EVERY_EXECUTION,
+                            trailX, trailY, trailZ, trailSize, activeState, renderParams, simulationState)
+                    .transferToDevice(DataTransferMode.FIRST_EXECUTION, projectedTrailX, projectedTrailY)
+                    .task("projectTrails", PhysicsKernels::projectTrails,
+                            trailX, trailY, trailZ, trailSize, activeState, renderParams,
+                            projectedTrailX, projectedTrailY, simulationState)
+                    .transferToHost(DataTransferMode.EVERY_EXECUTION, projectedTrailX, projectedTrailY);
+            nextTrailProjectionPlan = applySelectedTornadoDevice(new TornadoExecutionPlan(trailTaskGraph.snapshot()));
 
-        TaskGraph trailTaskGraph = new TaskGraph("trailProjection")
-                .transferToDevice(DataTransferMode.EVERY_EXECUTION,
-                        trailX, trailY, trailZ, trailSize, activeState, renderParams, simulationState)
-                .transferToDevice(DataTransferMode.FIRST_EXECUTION, projectedTrailX, projectedTrailY)
-                .task("projectTrails", PhysicsKernels::projectTrails,
-                        trailX, trailY, trailZ, trailSize, activeState, renderParams,
-                        projectedTrailX, projectedTrailY, simulationState)
-                .transferToHost(DataTransferMode.EVERY_EXECUTION, projectedTrailX, projectedTrailY);
-
-        trailProjectionPlan = applySelectedTornadoDevice(new TornadoExecutionPlan(trailTaskGraph.snapshot()));
+            executionPlan = nextExecutionPlan;
+            trailProjectionPlan = nextTrailProjectionPlan;
+            simulationPlanReady = true;
+            simulationPlanDirty = false;
+        } catch (RuntimeException | Error failure) {
+            closePlanQuietly(nextExecutionPlan);
+            closePlanQuietly(nextTrailProjectionPlan);
+            throw failure;
+        }
     }
 
     private TornadoExecutionPlan createNBodyExecutionPlan(int renderReadbackIntervalFrames) {
@@ -1816,8 +1832,49 @@ public class GravityGPU extends Application {
         return applySelectedTornadoDevice(new TornadoExecutionPlan(taskGraph.snapshot()));
     }
 
-    private void chooseTornadoDevice(Stage owner) {
-        selectedTornadoDevice = TornadoDeviceSelector.selectDevice(owner);
+    private ComboBox<TornadoDeviceChoice> createDeviceCombo(Stage stage) {
+        ComboBox<TornadoDeviceChoice> deviceCombo = new ComboBox<>();
+        List<TornadoDeviceChoice> devices = TornadoDeviceSelector.deviceChoices();
+        selectedDeviceChoice = TornadoDeviceSelector.initialDeviceChoice(devices);
+        selectedTornadoDevice = TornadoDeviceSelector.resolveDevice(stage, selectedDeviceChoice);
+        deviceCombo.getItems().setAll(devices);
+        deviceCombo.setValue(selectedDeviceChoice);
+        deviceCombo.setTooltip(new Tooltip("GPU device"));
+        double comboWidth = SIDEBAR_WIDTH - SIDEBAR_PADDING * 2.0 - DEVICE_COMBO_RIGHT_GAP;
+        deviceCombo.setPrefWidth(comboWidth);
+        deviceCombo.setMinWidth(comboWidth);
+        deviceCombo.setMaxWidth(comboWidth);
+        deviceCombo.setStyle("-fx-background-color: #1b2533; -fx-border-color: #497aa5; -fx-mark-color: #9ecfff; -fx-text-fill: white;");
+        deviceCombo.setButtonCell(tornadoDeviceListCell());
+        deviceCombo.setCellFactory(_ -> tornadoDeviceListCell());
+        deviceCombo.valueProperty().addListener((_, previousDevice, chosenDevice) -> {
+            if (chosenDevice == null || chosenDevice.equals(previousDevice)) {
+                return;
+            }
+            changeDevice(stage, chosenDevice);
+        });
+        return deviceCombo;
+    }
+
+    private ListCell<TornadoDeviceChoice> tornadoDeviceListCell() {
+        return new ListCell<>() {
+            @Override
+            protected void updateItem(TornadoDeviceChoice item, boolean empty) {
+                super.updateItem(item, empty);
+                setText(empty || item == null ? null : item.toString());
+                setTextFill(Color.WHITE);
+                setStyle("-fx-background-color: #1b2533;");
+            }
+        };
+    }
+
+    private void changeDevice(Stage stage, TornadoDeviceChoice deviceChoice) {
+        selectedDeviceChoice = deviceChoice;
+        selectedTornadoDevice = TornadoDeviceSelector.resolveDevice(stage, deviceChoice);
+        closeExecutionPlan();
+        resetSystem();
+        initTornadoPlanOnce();
+        warmUpTornadoPlans();
     }
 
     private TornadoExecutionPlan applySelectedTornadoDevice(TornadoExecutionPlan plan) {
@@ -1838,6 +1895,7 @@ public class GravityGPU extends Application {
         updateInterpolatedProjectedScreenPositions();
         trailProjectionPlan.execute();
         resetSystem();
+        initTornadoPlanOnce();
         computeDashboardMetricsOnCpu();
         projectedTrailYaw = Float.NaN;
         projectedTrailPitch = Float.NaN;
@@ -1881,23 +1939,29 @@ public class GravityGPU extends Application {
     }
 
     private void closeExecutionPlan() {
-        if (executionPlan != null) {
-            try {
-                executionPlan.close();
-            } catch (Exception _) {
-                // Rebuilding the plan is best effort; stale device memory can be reclaimed by TornadoVM.
-            }
-            executionPlan = null;
-        }
-        if (trailProjectionPlan != null) {
-            try {
-                trailProjectionPlan.close();
-            } catch (Exception _) {
-                // Rebuilding the plan is best effort; stale device memory can be reclaimed by TornadoVM.
-            }
-            trailProjectionPlan = null;
-        }
+        TornadoExecutionPlan currentExecutionPlan = executionPlan;
+        TornadoExecutionPlan currentTrailProjectionPlan = trailProjectionPlan;
+        executionPlan = null;
+        trailProjectionPlan = null;
         simulationPlanReady = false;
+        closePlanQuietly(currentExecutionPlan);
+        closePlanQuietly(currentTrailProjectionPlan);
+    }
+
+    private static void closePlanQuietly(TornadoExecutionPlan plan) {
+        if (plan == null) {
+            return;
+        }
+        try {
+            plan.close();
+        } catch (Exception _) {
+            // Rebuilding is best effort; TornadoVM can reclaim stale device memory.
+        }
+    }
+
+    @Override
+    public void stop() {
+        closeExecutionPlan();
     }
 
     private void updateElapsedTime(long now) {
