@@ -1,22 +1,25 @@
 package pawg.body;
 
 import javafx.application.Platform;
+import javafx.scene.Node;
 import javafx.scene.control.Label;
+import javafx.scene.layout.Pane;
 import javafx.scene.layout.VBox;
 import javafx.scene.paint.Color;
+import org.controlsfx.control.PopOver;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import uk.ac.manchester.tornado.api.types.arrays.FloatArray;
 
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.*;
 
 class BodySimulatorMassConversionTest {
 
@@ -75,7 +78,7 @@ class BodySimulatorMassConversionTest {
     }
 
     @Test
-    void dashboardShowsBidirectionalCalibrationAndSolarEquivalentForEveryBody() throws Exception {
+    void dashboardProvidesCalibrationThroughAStableHoverPopoverAndSolarEquivalentForEveryBody() throws Exception {
         BodySimulator simulator = onFxThread(BodySimulator::new);
         float[] bodyMasses = {0.0f, 1.0f, 1_000_000.0f};
         String[] bodyNames = {"Zero", "One", "Large"};
@@ -95,23 +98,37 @@ class BodySimulatorMassConversionTest {
 
             invoke(simulator, "updateDashboard");
             VBox dashboard = (VBox) field(simulator, "dashboard");
-            return dashboard.getChildren().stream()
-                    .filter(Label.class::isInstance)
-                    .map(Label.class::cast)
+            Label calibrationHeader = (Label) field(simulator, "unitCalibrationHeader");
+            Label calibrationExplanation = (Label) field(simulator, "unitCalibrationExplanation");
+            PopOver calibrationPopover = (PopOver) field(simulator, "unitCalibrationPopover");
+            assertEquals("Unit calibration", calibrationHeader.getText());
+            assertNotNull(calibrationPopover);
+            assertTrue(calibrationExplanation.isWrapText());
+            assertTrue(calibrationExplanation.getMaxWidth() > 0.0);
+            assertTrue(dashboard.getChildren().contains(calibrationHeader));
+            assertFalse(dashboard.getChildren().contains(calibrationExplanation),
+                    "the explanatory calibration text belongs in the hover PopOver, not the permanent dashboard");
+
+            invoke(simulator, "updateDashboard");
+            assertSame(calibrationHeader, field(simulator, "unitCalibrationHeader"),
+                    "repeated dashboard refreshes must keep one stable hover target");
+            assertSame(calibrationPopover, field(simulator, "unitCalibrationPopover"),
+                    "repeated dashboard refreshes must keep the existing PopOver");
+
+            return labelsIn(dashboard).stream()
                     .map(Label::getText)
                     .toList();
         });
 
-        String unitCalibration = dashboardText.stream()
-                .filter(text -> text.startsWith("Assuming 1 simulation second"))
-                .findFirst()
-                .orElseThrow(() -> new AssertionError("unit calibration explanation was not displayed"));
+        String unitCalibration = onFxThread(() -> ((Label) field(simulator, "unitCalibrationExplanation")).getText());
         double solarMassesPerMassUnit = BodySimulator.simulationMassUnitsToSolarMasses(1.0);
         double massUnitsPerSolarMass = BodySimulator.solarMassesToSimulationMassUnits(1.0);
         assertTrue(unitCalibration.contains("1 mu"));
         assertTrue(unitCalibration.contains(String.format("%.6g solar masses (M☉)", solarMassesPerMassUnit)));
         assertTrue(unitCalibration.contains("1 solar mass (M☉)"));
         assertTrue(unitCalibration.contains(String.format("%.6g mu", massUnitsPerSolarMass)));
+        assertTrue(dashboardText.stream().noneMatch(text -> text.startsWith("Assuming 1 simulation second")),
+                "the long explanation must not consume dashboard layout space");
 
         for (int i = 0; i < bodyMasses.length; i++) {
             int bodyIndex = i;
@@ -123,6 +140,19 @@ class BodySimulatorMassConversionTest {
             assertTrue(bodyLine.contains(String.format("(%.6g M☉)",
                     BodySimulator.simulationMassUnitsToSolarMasses(bodyMasses[i]))));
         }
+    }
+
+    private static List<Label> labelsIn(Node node) {
+        List<Label> labels = new ArrayList<>();
+        if (node instanceof Label label) {
+            labels.add(label);
+        }
+        if (node instanceof Pane pane) {
+            for (Node child : pane.getChildren()) {
+                labels.addAll(labelsIn(child));
+            }
+        }
+        return labels;
     }
 
     private static FloatArray floatArray(BodySimulator simulator, String name) throws Exception {

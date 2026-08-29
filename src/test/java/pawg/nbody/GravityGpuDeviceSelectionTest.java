@@ -1,9 +1,14 @@
 package pawg.nbody;
 
 import javafx.application.Platform;
+import javafx.scene.Scene;
 import javafx.scene.control.ComboBox;
 import javafx.scene.control.ListCell;
+import javafx.scene.input.MouseButton;
+import javafx.scene.input.MouseEvent;
+import javafx.scene.layout.VBox;
 import javafx.scene.paint.Color;
+import javafx.stage.Stage;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import uk.ac.manchester.tornado.api.common.TornadoDevice;
@@ -62,6 +67,40 @@ class GravityGpuDeviceSelectionTest {
         updateCell(popupCell, null, true);
         assertNull(popupCell.getText());
         assertEquals(Color.WHITE, popupCell.getTextFill());
+    }
+
+    @Test
+    void devicePopupCellUsesDistinctHoverBackgroundAndRestoresItAfterMouseExit() throws Exception {
+        GravityGPU simulation = new GravityGPU();
+        TornadoDeviceChoice choice = new TornadoDeviceChoice(
+                0, 1, "OpenCL device 0:1", "device info", "command output", false);
+        ListCell<TornadoDeviceChoice> popupCell = deviceListCell(simulation);
+
+        onFxThread(() -> {
+            Stage stage = showDevicePopupCell(popupCell);
+            try {
+                updateCell(popupCell, choice, false);
+                popupCell.applyCss();
+                Color normalBackground = cellBackgroundColor(popupCell);
+                assertEquals(Color.web("#1b2533"), normalBackground,
+                        "a populated device popup cell must start with the dashboard background");
+
+                fireMouseTransition(popupCell, MouseEvent.MOUSE_ENTERED);
+                popupCell.applyCss();
+                Color hoverBackground = cellBackgroundColor(popupCell);
+                assertEquals(Color.web("#365f85"), hoverBackground,
+                        "hovering a populated device popup cell must make the candidate selection visible");
+                assertNotEquals(normalBackground, hoverBackground);
+
+                fireMouseTransition(popupCell, MouseEvent.MOUSE_EXITED);
+                popupCell.applyCss();
+                assertEquals(normalBackground, cellBackgroundColor(popupCell),
+                        "leaving the popup item must restore its normal background");
+            } finally {
+                stage.close();
+            }
+            return null;
+        });
     }
 
     @Test
@@ -189,6 +228,26 @@ class GravityGpuDeviceSelectionTest {
             method.setAccessible(true);
             return (ListCell<TornadoDeviceChoice>) method.invoke(simulation);
         });
+    }
+
+    private static void fireMouseTransition(ListCell<?> cell, javafx.event.EventType<MouseEvent> eventType) {
+        cell.fireEvent(new MouseEvent(eventType, 1.0, 1.0, 1.0, 1.0, MouseButton.NONE, 0,
+                false, false, false, false, false, false, false, false, false, false, null));
+    }
+
+    private static Stage showDevicePopupCell(ListCell<?> cell) {
+        Stage stage = new Stage();
+        stage.setScene(new Scene(new VBox(cell), 400.0, 60.0));
+        stage.show();
+        stage.getScene().getRoot().applyCss();
+        return stage;
+    }
+
+    private static Color cellBackgroundColor(ListCell<?> cell) {
+        assertFalse(cell.getBackground().getFills().isEmpty(), "the cell must have a rendered background");
+        assertTrue(cell.getBackground().getFills().getFirst().getFill() instanceof Color,
+                "the device popup cell background must be a solid color");
+        return (Color) cell.getBackground().getFills().getFirst().getFill();
     }
 
     private static void assumeConfiguredTornadoRuntime() {

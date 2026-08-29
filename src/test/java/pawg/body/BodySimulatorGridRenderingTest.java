@@ -16,10 +16,7 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertSame;
-import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.*;
 
 class BodySimulatorGridRenderingTest {
 
@@ -127,6 +124,20 @@ class BodySimulatorGridRenderingTest {
         assertTrue(initialPointCount != (int) field(simulator, "gridPointCount"),
                 "a zoom change must rebuild geometry with adaptive density");
         assertFiniteGridPoints(simulator);
+    }
+
+    @Test
+    void physicalGridBendDoesNotChangeWhenOnlyTheViewZoomChanges() throws Exception {
+        BodySimulator simulator = newSimulatorWithBody(0.0f, 0.0f, 0.0f, 500.0f);
+        double[] before = bentGridPoint(simulator, 3.0, 1.0);
+        setField(simulator, "viewScale", 16.0);
+        double[] zoomedOut = bentGridPoint(simulator, 3.0, 1.0);
+        setField(simulator, "viewScale", 180.0);
+        double[] zoomedIn = bentGridPoint(simulator, 3.0, 1.0);
+
+        assertArrayEquals(before, zoomedOut, 1.0e-6,
+                "grid deformation is a physical world-space value, not a zoom-dependent value");
+        assertArrayEquals(before, zoomedIn, 1.0e-6);
     }
 
     private static WritableImage renderGridSegment(float fromX, float toX) throws Exception {

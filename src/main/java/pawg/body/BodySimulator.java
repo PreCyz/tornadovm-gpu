@@ -1,19 +1,25 @@
 package pawg.body;
 
-import javafx.animation.AnimationTimer;
+import javafx.animation.*;
 import javafx.application.Application;
+import javafx.beans.binding.DoubleBinding;
+import javafx.beans.property.DoubleProperty;
+import javafx.beans.property.SimpleDoubleProperty;
 import javafx.geometry.*;
 import javafx.scene.Scene;
 import javafx.scene.canvas.Canvas;
 import javafx.scene.canvas.GraphicsContext;
 import javafx.scene.control.*;
-import javafx.scene.input.MouseButton;
+import javafx.scene.input.*;
 import javafx.scene.layout.*;
 import javafx.scene.paint.*;
+import javafx.scene.shape.Rectangle;
 import javafx.scene.text.Font;
 import javafx.scene.text.TextAlignment;
 import javafx.stage.Screen;
 import javafx.stage.Stage;
+import javafx.util.Duration;
+import org.controlsfx.control.PopOver;
 import pawg.nbody.TornadoDeviceChoice;
 import pawg.nbody.TornadoDeviceSelector;
 import uk.ac.manchester.tornado.api.TaskGraph;
@@ -32,6 +38,8 @@ public class BodySimulator extends Application {
     private static final int SIDEBAR_WIDTH = 520;
     private static final double SIDEBAR_PADDING = 14.0;
     private static final double DEVICE_COMBO_RIGHT_GAP = 15.0;
+    private static final double HOVER_POPOVER_GAP = 8.0;
+    private static final double DASHBOARD_DRAWER_ANIMATION_MILLIS = 240.0;
     private static final float G = 100.0f;
     private static final float DT = 0.015f;
     private static final float SOFTENING = 25.0f;
@@ -47,6 +55,10 @@ public class BodySimulator extends Application {
     private static final double GRID_SEGMENT_MIN_LIMIT_PIXELS = 48.0;
     private static final double GRID_MIN_LINE_SPACING_PIXELS = 10.0;
     private static final double GRID_MIN_SAMPLE_SPACING_PIXELS = 4.0;
+    private static final double GRID_CLIP_MARGIN_PIXELS = 24.0;
+    private static final double GRID_MAX_WORLD_SPAN_FACTOR = 24.0;
+    private static final int GRID_MAX_LINES_PER_AXIS = 240;
+    private static final int GRID_MAX_SAMPLES_PER_LINE = 600;
     private static final int PHOTON_MIN_STEPS = 900;
     private static final int PHOTON_MAX_STEPS = 60_000;
     private static final double PHOTON_STEP_DISTANCE = 0.08;
@@ -73,6 +85,11 @@ public class BodySimulator extends Application {
     private static final double CAMERA_PITCH_MIN = -Math.PI * 0.48;
     private static final double CAMERA_PITCH_MAX = Math.PI * 0.48;
     private static final double CAMERA_DRAG_SENSITIVITY = 0.006;
+    private static final double CAMERA_PAN_VIEWPORT_FRACTION = 0.10;
+    private static final double CAMERA_FAST_PAN_MULTIPLIER = 4.0;
+    private static final double PLANE_INTERSECTION_EPSILON = 1.0e-5;
+    private static final int ORBIT_GUIDE_SEGMENTS = 160;
+    private static final double ROTATION_INDICATOR_BODY_RADIUS = 3.25;
     private static final int FULL_TRACK_RENDER_POINT_LIMIT = 2_000;
     private static final boolean CPU_PHYSICS = Boolean.getBoolean("pawg.body.cpu");
     private static final String GREEN_BUTTON_STYLE = "-fx-background-color: #1d2b24; -fx-text-fill: #00ff88; -fx-border-color: #00aa66; -fx-font-weight: bold; -fx-cursor: hand;";
@@ -120,11 +137,36 @@ public class BodySimulator extends Application {
     private final List<Point3>[] fullTracks = new ArrayList[MAX_BODIES];
     private final List<Point3> photonPath = new ArrayList<>();
     private final List<Point3> animatedPhotonPath = new ArrayList<>();
+    private final int[] indicatorBodyOrder = new int[MAX_BODIES];
+    private final double[][] indicatorViewPositions = new double[MAX_BODIES][3];
+    private final double[] clippedLine = new double[4];
     private double photonImpactParameter = PHOTON_IMPACT_PARAMETER;
 
     private final VBox dashboard = new VBox(8);
     private final VBox editorList = new VBox(6);
+    private final DoubleProperty dashboardDrawerProgress = new SimpleDoubleProperty(this, "dashboardDrawerProgress");
+    private PopOver guidePopover;
+    private PopOver unitDescriptionPopover;
+    private Label unitCalibrationHeader;
+    private Label unitCalibrationExplanation;
+    private PopOver unitCalibrationPopover;
+    /**
+     * The dynamically refreshed dashboard rows.  Keeping this separate from
+     * the calibration header preserves that label's hover handlers while the
+     * simulation timer refreshes body telemetry.
+     */
+    private VBox dashboardDynamicContent;
     private Canvas canvas;
+    private Button dashboardHideButton;
+    private Button dashboardRestoreButton;
+    private Timeline dashboardDrawerTimeline;
+    private AnimationTimer simulationTimer;
+    private Label elapsedTimeLabel;
+    private boolean elapsedClockRunning;
+    private long elapsedAccumulatedNanos;
+    private long elapsedSegmentStartNanos = -1L;
+    private long lastAnimationNow = -1L;
+    private long displayedElapsedSecond = -1L;
     private TornadoExecutionPlan executionPlan;
     private TornadoDevice selectedDevice;
     private TornadoDeviceChoice selectedDeviceChoice;
@@ -144,11 +186,15 @@ public class BodySimulator extends Application {
     private double cameraYaw;
     private double cameraPitch;
     private double cameraRoll;
+    private double viewCenterX;
+    private double viewCenterY;
+    private double viewCenterZ;
     private double dragStartX;
     private double dragStartY;
     private double dragStartYaw;
     private double dragStartPitch;
     private double dragStartRoll;
+    private double draggedBodyViewDepth;
     private boolean rotatingCamera;
     private boolean rotatingRoll;
     private int mergedBodySequence;
@@ -163,12 +209,19 @@ public class BodySimulator extends Application {
     private double cachedGridWidth = Double.NaN;
     private double cachedGridHeight = Double.NaN;
     private double cachedGridViewScale = Double.NaN;
+    private double cachedGridViewCenterX = Double.NaN;
+    private double cachedGridViewCenterY = Double.NaN;
+    private double cachedGridViewCenterZ = Double.NaN;
+    private double cachedGridCameraYaw = Double.NaN;
+    private double cachedGridCameraPitch = Double.NaN;
+    private double cachedGridCameraRoll = Double.NaN;
     private double cachedGridSampleStep = GRID_STEP * 0.35;
 
     private record Point3(float x, float y, float z) {
     }
 
     private record GridProjection(
+            double centerX, double centerY, double centerZ,
             double cosYaw, double sinYaw,
             double cosPitch, double sinPitch,
             double cosRoll, double sinRoll) {
@@ -187,41 +240,7 @@ public class BodySimulator extends Application {
 
         Rectangle2D bounds = Screen.getPrimary().getVisualBounds();
         canvas = new Canvas(Math.max(760.0, bounds.getWidth() - SIDEBAR_WIDTH), bounds.getHeight());
-        canvas.setOnMousePressed(event -> {
-            draggedBodyIndex = bodyAt(event.getX(), event.getY());
-            rotatingCamera = draggedBodyIndex < 0;
-            rotatingRoll = rotatingCamera && event.getButton() == MouseButton.SECONDARY;
-            dragStartX = event.getX();
-            dragStartY = event.getY();
-            dragStartYaw = cameraYaw;
-            dragStartPitch = cameraPitch;
-            dragStartRoll = cameraRoll;
-        });
-        canvas.setOnMouseDragged(event -> {
-            if (rotatingCamera) {
-                double dx = event.getX() - dragStartX;
-                double dy = event.getY() - dragStartY;
-                if (rotatingRoll || event.isShiftDown()) {
-                    cameraRoll = dragStartRoll + dx * CAMERA_DRAG_SENSITIVITY;
-                } else {
-                    cameraYaw = dragStartYaw + dx * CAMERA_DRAG_SENSITIVITY;
-                    cameraPitch = Math.clamp(dragStartPitch - dy * CAMERA_DRAG_SENSITIVITY,
-                            CAMERA_PITCH_MIN, CAMERA_PITCH_MAX);
-                }
-                draw();
-            } else {
-                dragBodyTo(event.getX(), event.getY());
-            }
-        });
-        canvas.setOnMouseReleased(_ -> {
-            draggedBodyIndex = -1;
-            rotatingCamera = false;
-            rotatingRoll = false;
-        });
-        canvas.setOnScroll(event -> {
-            zoom(event.getDeltaY(), event.getX(), event.getY());
-            event.consume();
-        });
+        configureCanvasInteractions(canvas);
 
         Button addButton = new Button("+");
         addButton.setTooltip(new Tooltip("Add body"));
@@ -241,6 +260,8 @@ public class BodySimulator extends Application {
         photonButton.setTooltip(new Tooltip("Shoot a photon toward Body 1"));
         applyGravityButtonStyle(photonButton, BLUE_BUTTON_STYLE);
         photonButton.setOnAction(_ -> askPhotonOffsetAndShoot(stage));
+
+        Button hideDashboardButton = createDashboardHideButton();
 
         ComboBox<TornadoDeviceChoice> deviceCombo = createDeviceCombo(stage);
 
@@ -277,14 +298,14 @@ public class BodySimulator extends Application {
 
         Label title = new Label("Body Simulator");
         title.setStyle("-fx-text-fill: #00e59b; -fx-font-size: 15px; -fx-font-weight: bold;");
-        Label help = new Label("Add bodies, edit initial position/velocity/mass, then start GPU simulation.");
-        help.setWrapText(true);
-        help.setStyle("-fx-text-fill: #b8c2d6;");
-        Label units = new Label(String.format(
-                "Units: distance = simulation space units (du), speed = du/simulation second, mass = simulation mass units (mu). Grid uses Phi = -G*m/r. Photon bending uses weak-field deflection proportional to 2Gm/(c^2*r^2), G = %.1f, c = %.1f du/s. Bodies with mass >= %.0f mu act as black holes and can trap photons.",
-                G, PHOTON_LIGHT_SPEED, BLACK_HOLE_MASS_THRESHOLD));
-        units.setWrapText(true);
-        units.setStyle("-fx-text-fill: #d8deef; -fx-font-size: 11px;");
+        elapsedTimeLabel = new Label("Elapsed 00:00:00");
+        elapsedTimeLabel.setAccessibleText("Elapsed simulation time");
+        elapsedTimeLabel.setStyle("-fx-text-fill: #c4cbe0; -fx-font-family: monospace; -fx-font-size: 12px;");
+        HBox titleRow = new HBox(12.0, title, elapsedTimeLabel);
+        titleRow.setAlignment(Pos.CENTER_LEFT);
+        SidebarHoverTriggers hoverTriggers = createSidebarHoverTriggers();
+        Label guide = hoverTriggers.guide();
+        Label unitDescription = hoverTriggers.unitDescription();
 
         ScrollPane editorScroll = new ScrollPane(editorList);
         editorScroll.setFitToWidth(true);
@@ -296,13 +317,17 @@ public class BodySimulator extends Application {
         dashboardScroll.setStyle("-fx-background: #10131c; -fx-background-color: #10131c; -fx-control-inner-background: #10131c;");
         VBox.setVgrow(dashboardScroll, Priority.ALWAYS);
 
-        VBox side = new VBox(10, title, controlsPane, help, units, sectionLabel("Initial bodies"), editorScroll, sectionLabel("Dashboard"), dashboardScroll);
+        VBox side = new VBox(10, titleRow, controlsPane, guide, unitDescription, sectionLabel("Initial bodies"), editorScroll, sectionLabel("Dashboard"), dashboardScroll);
         side.setPadding(new Insets(14));
         side.setPrefWidth(SIDEBAR_WIDTH);
+        side.setMinWidth(SIDEBAR_WIDTH);
+        side.setMaxWidth(SIDEBAR_WIDTH);
         side.setStyle("-fx-background-color: #10131c; -fx-border-color: #2b3142; -fx-border-width: 0 0 0 1;");
 
-        BorderPane root = new BorderPane(canvas, null, side, null, null);
+        DrawerLayout drawerLayout = createDrawerLayout(canvas, side, hideDashboardButton);
+        StackPane root = drawerLayout.root();
         Scene scene = new Scene(root, bounds.getWidth(), bounds.getHeight(), Color.BLACK);
+        scene.addEventFilter(KeyEvent.KEY_PRESSED, this::handleCameraKeyPressed);
         stage.setTitle("GPU Body Simulator");
         BodyStageIcons.addBodyIcon(stage);
         stage.setScene(scene);
@@ -316,11 +341,12 @@ public class BodySimulator extends Application {
         draw();
         updateDashboard();
 
-        new AnimationTimer() {
+        simulationTimer = new AnimationTimer() {
             private int frame;
 
             @Override
             public void handle(long now) {
+                updateElapsedClock(now);
                 if (running && bodyCount > 0) {
                     stepSimulation();
                     resolveBodyCollisions();
@@ -336,7 +362,66 @@ public class BodySimulator extends Application {
                 draw();
                 updateDashboard();
             }
-        }.start();
+        };
+        simulationTimer.start();
+    }
+
+    /**
+     * Installs only JavaFX input routing.  It deliberately does not discover a
+     * TornadoVM device or build an execution plan, so interaction tests can use
+     * an isolated canvas.
+     */
+    void configureCanvasInteractions(Canvas simulationCanvas) {
+        canvas = simulationCanvas;
+        canvas.setOnMousePressed(event -> {
+            canvas.requestFocus();
+            if (event.getButton() == MouseButton.SECONDARY) {
+                int removedBodyIndex = bodyAt(event.getX(), event.getY());
+                if (removedBodyIndex >= 0) {
+                    removeBody(removedBodyIndex);
+                    event.consume();
+                    return;
+                }
+            }
+            draggedBodyIndex = bodyAt(event.getX(), event.getY());
+            rotatingCamera = draggedBodyIndex < 0;
+            rotatingRoll = rotatingCamera && event.getButton() == MouseButton.SECONDARY;
+            if (draggedBodyIndex >= 0) {
+                draggedBodyViewDepth = worldToView(
+                        posX.get(draggedBodyIndex), posY.get(draggedBodyIndex), posZ.get(draggedBodyIndex))[2];
+            }
+            dragStartX = event.getX();
+            dragStartY = event.getY();
+            dragStartYaw = cameraYaw;
+            dragStartPitch = cameraPitch;
+            dragStartRoll = cameraRoll;
+        });
+        canvas.setOnMouseDragged(event -> {
+            if (rotatingCamera) {
+                double dx = event.getX() - dragStartX;
+                double dy = event.getY() - dragStartY;
+                if (rotatingRoll || event.isShiftDown()) {
+                    cameraRoll = dragStartRoll + dx * CAMERA_DRAG_SENSITIVITY;
+                } else {
+                    cameraYaw = dragStartYaw + dx * CAMERA_DRAG_SENSITIVITY;
+                    cameraPitch = Math.clamp(dragStartPitch - dy * CAMERA_DRAG_SENSITIVITY,
+                            CAMERA_PITCH_MIN, CAMERA_PITCH_MAX);
+                }
+                invalidateGridGeometry();
+                draw();
+            } else {
+                dragBodyTo(event.getX(), event.getY());
+            }
+        });
+        canvas.setOnMouseReleased(_ -> {
+            draggedBodyIndex = -1;
+            rotatingCamera = false;
+            rotatingRoll = false;
+        });
+        canvas.setOnScroll(event -> {
+            zoom(event.getDeltaY(), event.getX(), event.getY());
+            event.consume();
+        });
     }
 
     private ComboBox<TornadoDeviceChoice> createDeviceCombo(Stage stage) {
@@ -365,12 +450,24 @@ public class BodySimulator extends Application {
 
     private ListCell<TornadoDeviceChoice> tornadoDeviceListCell() {
         return new ListCell<>() {
+            {
+                hoverProperty().addListener((_, _, _) -> updateCellStyle());
+            }
+
             @Override
             protected void updateItem(TornadoDeviceChoice item, boolean empty) {
                 super.updateItem(item, empty);
                 setText(empty || item == null ? null : item.toString());
                 setTextFill(Color.WHITE);
-                setStyle("-fx-background-color: #1b2533;");
+                updateCellStyle();
+            }
+
+            private void updateCellStyle() {
+                setStyle(isEmpty()
+                        ? ""
+                        : isHover()
+                                ? "-fx-background-color: #365f85;"
+                                : "-fx-background-color: #1b2533;");
             }
         };
     }
@@ -387,6 +484,7 @@ public class BodySimulator extends Application {
             snapshotInitialState();
         }
         running = true;
+        resumeElapsedClock();
         invalidateExecutionPlan();
         clearTrails();
         clearFullTracks();
@@ -397,15 +495,44 @@ public class BodySimulator extends Application {
         if (bodyCount >= MAX_BODIES) {
             return;
         }
-        running = false;
         int i = bodyCount++;
         names[i] = "Body " + bodyCount;
+        colors[i] = Color.hsb((i * 47.0) % 360.0, 0.80, 1.0);
         setBody(i, (i % 6 - 2) * 2.0f, (i / 6f) * 2.0f, 0.0f, 0.0f, 0.65f + i * 0.03f, 0.0f, 10.0f);
+        accX.set(i, 0.0f);
+        accY.set(i, 0.0f);
+        accZ.set(i, 0.0f);
+        nextAccX.set(i, 0.0f);
+        nextAccY.set(i, 0.0f);
+        nextAccZ.set(i, 0.0f);
         active.set(i, 1);
         state.set(0, bodyCount);
+        trails[i].clear();
+        fullTracks[i].clear();
         snapshotInitialState();
         rebuildEditors();
+        invalidateGridGeometry();
+        draw();
+        updateDashboard();
+    }
+
+    /**
+     * Removes a canvas-selected body and persists the compacted host state as the
+     * next reset snapshot before the old device execution plan is discarded.
+     */
+    private void removeBody(int removedIndex) {
+        if (removedIndex < 0 || removedIndex >= bodyCount) {
+            return;
+        }
+        draggedBodyIndex = -1;
+        removeBodySlot(removedIndex);
+        state.set(0, bodyCount);
+        snapshotInitialState();
+        clearTrails();
+        clearFullTracks();
+        clearPhotonPath();
         invalidateExecutionPlan();
+        rebuildEditors();
         draw();
         updateDashboard();
     }
@@ -437,11 +564,13 @@ public class BodySimulator extends Application {
 
     private void resetToInitialState() {
         running = false;
+        resetElapsedClock();
         draggedBodyIndex = -1;
         viewScale = INITIAL_VIEW_SCALE;
         cameraYaw = 0.0;
         cameraPitch = 0.0;
         cameraRoll = 0.0;
+        recenterView();
         bodyCount = initialBodyCount;
         state.set(0, bodyCount);
         for (int i = 0; i < MAX_BODIES; i++) {
@@ -498,7 +627,7 @@ public class BodySimulator extends Application {
 
         if (mergedAny) {
             state.set(0, bodyCount);
-            invalidateExecutionPlan();
+            invalidateGridGeometry();
             clearTrails();
             clearFullTracks();
             clearPhotonPath();
@@ -580,6 +709,7 @@ public class BodySimulator extends Application {
         nextAccZ.set(index, 0.0f);
         active.set(index, 0);
         names[index] = null;
+        colors[index] = null;
     }
 
     private void rebuildEditors() {
@@ -677,6 +807,117 @@ public class BodySimulator extends Application {
         button.setFocusTraversable(false);
     }
 
+    Button createDashboardHideButton() {
+        dashboardHideButton = createDashboardEdgeButton("▶", "Hide dashboard");
+        dashboardHideButton.setOnAction(_ -> setDashboardDrawerHidden(true));
+        return dashboardHideButton;
+    }
+
+    record DrawerLayout(StackPane root, StackPane simulationArea, VBox sidebar,
+                        Button hideButton, Button restoreButton) {
+    }
+
+    /**
+     * Builds the production drawer arrangement without discovering a TornadoVM
+     * device.  Package tests can therefore exercise the same bindings and
+     * controls as {@link #start(Stage)} in a normal JavaFX stage.
+     */
+    DrawerLayout createDrawerLayout(Canvas simulationCanvas, VBox side, Button hideButton) {
+        canvas = simulationCanvas;
+        dashboardHideButton = hideButton;
+        StackPane simulationArea = new StackPane(simulationCanvas);
+        StackPane.setAlignment(simulationArea, Pos.TOP_LEFT);
+        simulationArea.setMinSize(0.0, 0.0);
+
+        StackPane root = new StackPane(simulationArea, side);
+        DoubleBinding visibleSidebarWidth = dashboardDrawerProgress.subtract(1.0).negate().multiply(SIDEBAR_WIDTH);
+        simulationArea.prefWidthProperty().bind(root.widthProperty().subtract(visibleSidebarWidth));
+        simulationArea.maxWidthProperty().bind(root.widthProperty().subtract(visibleSidebarWidth));
+        simulationArea.prefHeightProperty().bind(root.heightProperty());
+        simulationArea.maxHeightProperty().bind(root.heightProperty());
+        simulationCanvas.widthProperty().bind(simulationArea.widthProperty());
+        simulationCanvas.heightProperty().bind(simulationArea.heightProperty());
+        simulationCanvas.widthProperty().addListener((_, _, _) -> invalidateGridGeometry());
+        simulationCanvas.heightProperty().addListener((_, _, _) -> invalidateGridGeometry());
+
+        StackPane.setAlignment(side, Pos.TOP_RIGHT);
+        side.setMinWidth(SIDEBAR_WIDTH);
+        side.setMaxWidth(SIDEBAR_WIDTH);
+        side.translateXProperty().bind(dashboardDrawerProgress.multiply(SIDEBAR_WIDTH));
+        Rectangle rootClip = new Rectangle();
+        rootClip.widthProperty().bind(root.widthProperty());
+        rootClip.heightProperty().bind(root.heightProperty());
+        root.setClip(rootClip);
+
+        dashboardRestoreButton = createDashboardEdgeButton("◀", "Show dashboard");
+        dashboardRestoreButton.setOnAction(_ -> setDashboardDrawerHidden(false));
+        setDashboardEdgeButtonActive(dashboardHideButton, true);
+        setDashboardEdgeButtonActive(dashboardRestoreButton, false);
+        root.getChildren().addAll(dashboardHideButton, dashboardRestoreButton);
+        return new DrawerLayout(root, simulationArea, side, dashboardHideButton, dashboardRestoreButton);
+    }
+
+    private Button createDashboardEdgeButton(String arrow, String description) {
+        Button button = new Button(arrow);
+        button.setTooltip(new Tooltip(description));
+        button.setAccessibleText(description);
+        applyGravityButtonStyle(button, BLUE_BUTTON_STYLE);
+        button.setFocusTraversable(true);
+        button.setStyle(button.getStyle() + " -fx-min-width: 28px; -fx-min-height: 42px;");
+        StackPane.setAlignment(button, Pos.CENTER_RIGHT);
+        StackPane.setMargin(button, new Insets(0.0, 4.0, 0.0, 0.0));
+        return button;
+    }
+
+    /**
+     * Drives the sidebar as a drawer.  Progress is shared by the drawer
+     * translation and simulation-area width, so they cannot drift apart during
+     * a transition or a window resize.
+     */
+    private void setDashboardDrawerHidden(boolean hidden) {
+        double targetProgress = hidden ? 1.0 : 0.0;
+        if (dashboardHideButton == null || dashboardRestoreButton == null) {
+            return;
+        }
+        if (dashboardDrawerTimeline != null) {
+            dashboardDrawerTimeline.stop();
+            dashboardDrawerTimeline = null;
+        }
+        if (hidden) {
+            hidePopover(guidePopover);
+            hidePopover(unitDescriptionPopover);
+            hidePopover(unitCalibrationPopover);
+        }
+        updateDashboardEdgeButtons(null);
+        if (Math.abs(dashboardDrawerProgress.get() - targetProgress) < 1.0e-6) {
+            dashboardDrawerProgress.set(targetProgress);
+            updateDashboardEdgeButtons(hidden);
+            return;
+        }
+
+        KeyValue drawerTarget = new KeyValue(dashboardDrawerProgress, targetProgress, Interpolator.EASE_BOTH);
+        dashboardDrawerTimeline = new Timeline(new KeyFrame(
+                Duration.millis(DASHBOARD_DRAWER_ANIMATION_MILLIS), drawerTarget));
+        dashboardDrawerTimeline.setOnFinished(_ -> {
+            dashboardDrawerProgress.set(targetProgress);
+            dashboardDrawerTimeline = null;
+            updateDashboardEdgeButtons(hidden);
+        });
+        dashboardDrawerTimeline.play();
+    }
+
+    private void updateDashboardEdgeButtons(Boolean dashboardHidden) {
+        setDashboardEdgeButtonActive(dashboardHideButton, Boolean.FALSE.equals(dashboardHidden));
+        setDashboardEdgeButtonActive(dashboardRestoreButton, Boolean.TRUE.equals(dashboardHidden));
+    }
+
+    private void setDashboardEdgeButtonActive(Button button, boolean active) {
+        button.setVisible(active);
+        button.setManaged(active);
+        button.setDisable(!active);
+        button.setMouseTransparent(!active);
+    }
+
     private void applyControlCheckboxStyle(CheckBox checkBox) {
         checkBox.setStyle("-fx-text-fill: white;");
         checkBox.setMinWidth(Region.USE_PREF_SIZE);
@@ -687,6 +928,98 @@ public class BodySimulator extends Application {
         Label label = new Label(text);
         label.setStyle("-fx-text-fill: #d8deef; -fx-font-size: 12px; -fx-font-weight: bold;");
         return label;
+    }
+
+    private record HoverPopoverTrigger(Label trigger, PopOver popover) {
+    }
+
+    record SidebarHoverTriggers(Label guide, Label unitDescription) {
+    }
+
+    SidebarHoverTriggers createSidebarHoverTriggers() {
+        HoverPopoverTrigger guideTrigger = createHoverPopoverLabel("Guide", "Add bodies, edit initial position/velocity/mass, then start GPU simulation. "
+                + "Drag empty space to rotate, Shift-drag or right-drag to roll, scroll to zoom, "
+                + "use arrow keys to pan (Shift for faster movement), and Home to recenter. "
+                + "Right-click a body to remove it from the simulation.");
+        guidePopover = guideTrigger.popover();
+
+        HoverPopoverTrigger unitDescriptionTrigger = createHoverPopoverLabel("Unit description", String.format(
+                "Units: distance = simulation space units (du), speed = du/simulation second, mass = simulation mass units (mu). Grid uses Phi = -G*m/r. Photon bending uses weak-field deflection proportional to 2Gm/(c^2*r^2), G = %.1f, c = %.1f du/s. Bodies with mass >= %.0f mu act as black holes and can trap photons.",
+                G, PHOTON_LIGHT_SPEED, BLACK_HOLE_MASS_THRESHOLD));
+        unitDescriptionPopover = unitDescriptionTrigger.popover();
+        return new SidebarHoverTriggers(guideTrigger.trigger(), unitDescriptionTrigger.trigger());
+    }
+
+    private HoverPopoverTrigger createHoverPopoverLabel(String text, String explanation) {
+        Label trigger = new Label(text);
+        trigger.setStyle("-fx-text-fill: #9ecfff; -fx-font-size: 12px; -fx-font-weight: bold; -fx-cursor: hand;");
+        PopOver popover = createHoverPopover(createPopoverContent(explanation));
+        installHoverPopover(trigger, popover);
+        return new HoverPopoverTrigger(trigger, popover);
+    }
+
+    private Label createPopoverContent(String text) {
+        Label content = new Label(text);
+        content.setWrapText(true);
+        content.setMaxWidth(SIDEBAR_WIDTH - SIDEBAR_PADDING * 4.0);
+        content.setPadding(new Insets(9));
+        content.setStyle("-fx-text-fill: #f2f5fb; -fx-font-size: 11px; -fx-background-color: #151a26; -fx-background-radius: 5;");
+        content.setMouseTransparent(true);
+        return content;
+    }
+
+    private PopOver createHoverPopover(Label content) {
+        PopOver popover = new PopOver(content);
+        popover.setAnimated(false);
+        popover.setAutoHide(false);
+        popover.setDetachable(false);
+        return popover;
+    }
+
+    private void installHoverPopover(Label trigger, PopOver popover) {
+        popover.setOnShown(_ -> keepPopoverClearOfTrigger(trigger, popover));
+        trigger.setOnMouseEntered(_ -> {
+            if (!popover.isShowing()) {
+                placePopoverOnRoomierSide(trigger, popover);
+                // A negative offset creates a gap between the arrow and owner.
+                // ControlsFX otherwise uses a positive overlap by default.
+                popover.show(trigger, -HOVER_POPOVER_GAP);
+            }
+        });
+        trigger.setOnMouseExited(_ -> popover.hide());
+    }
+
+    private void placePopoverOnRoomierSide(Label trigger, PopOver popover) {
+        Bounds triggerBounds = trigger.localToScreen(trigger.getBoundsInLocal());
+        if (triggerBounds == null) {
+            return;
+        }
+        Rectangle2D screenBounds = Screen.getScreensForRectangle(
+                        triggerBounds.getMinX(), triggerBounds.getMinY(),
+                        triggerBounds.getWidth(), triggerBounds.getHeight())
+                .stream()
+                .findFirst()
+                .map(Screen::getVisualBounds)
+                .orElseGet(() -> Screen.getPrimary().getVisualBounds());
+        double leftSpace = triggerBounds.getMinX() - screenBounds.getMinX();
+        double rightSpace = screenBounds.getMaxX() - triggerBounds.getMaxX();
+        popover.setArrowLocation(leftSpace >= rightSpace
+                ? PopOver.ArrowLocation.RIGHT_TOP
+                : PopOver.ArrowLocation.LEFT_TOP);
+    }
+
+    private void keepPopoverClearOfTrigger(Label trigger, PopOver popover) {
+        Bounds triggerBounds = trigger.localToScreen(trigger.getBoundsInLocal());
+        if (triggerBounds == null || popover.getWidth() <= 0.0) {
+            return;
+        }
+        if (popover.getArrowLocation() == PopOver.ArrowLocation.RIGHT_TOP) {
+            double maximumX = triggerBounds.getMinX() - HOVER_POPOVER_GAP - popover.getWidth();
+            popover.setX(Math.min(popover.getX(), maximumX));
+        } else {
+            double minimumX = triggerBounds.getMaxX() + HOVER_POPOVER_GAP;
+            popover.setX(Math.max(popover.getX(), minimumX));
+        }
     }
 
     private void addGridField(GridPane grid, String labelText, TextField field, int column, int row) {
@@ -702,9 +1035,10 @@ public class BodySimulator extends Application {
         }
         closeExecutionPlan();
         TaskGraph graph = new TaskGraph("body-simulator")
-                .transferToDevice(DataTransferMode.FIRST_EXECUTION,
+                .transferToDevice(DataTransferMode.EVERY_EXECUTION,
                         posX, posY, posZ, velX, velY, velZ, accX, accY, accZ,
-                        nextAccX, nextAccY, nextAccZ, mass, active, params, state)
+                        nextAccX, nextAccY, nextAccZ, mass, active, state)
+                .transferToDevice(DataTransferMode.FIRST_EXECUTION, params)
                 .task("current-acceleration", BodyPhysicsKernels::computeAcceleration,
                         posX, posY, posZ, accX, accY, accZ, mass, active, params, state)
                 .task("position-update", BodyPhysicsKernels::updatePositions,
@@ -732,13 +1066,17 @@ public class BodySimulator extends Application {
             rebuildPlanIfNeeded();
             executionPlan.execute();
         }
-        gridGeometryDirty = true;
+        invalidateGridGeometry();
     }
 
     private void invalidateExecutionPlan() {
         planDirty = true;
-        gridGeometryDirty = true;
+        invalidateGridGeometry();
         closeExecutionPlan();
+    }
+
+    private void invalidateGridGeometry() {
+        gridGeometryDirty = true;
     }
 
     private void closeExecutionPlan() {
@@ -803,6 +1141,61 @@ public class BodySimulator extends Application {
         }
         visiblePhotonPoints = Math.min(photonPath.size(), visiblePhotonPoints + 6);
         photonAnimating = visiblePhotonPoints < photonPath.size();
+    }
+
+    private void resumeElapsedClock() {
+        if (!elapsedClockRunning) {
+            elapsedClockRunning = true;
+            elapsedSegmentStartNanos = -1L;
+        }
+    }
+
+    private void pauseElapsedClock() {
+        if (!elapsedClockRunning) {
+            return;
+        }
+        if (elapsedSegmentStartNanos >= 0L && lastAnimationNow >= elapsedSegmentStartNanos) {
+            elapsedAccumulatedNanos += lastAnimationNow - elapsedSegmentStartNanos;
+        }
+        elapsedClockRunning = false;
+        elapsedSegmentStartNanos = -1L;
+        updateElapsedLabel(elapsedAccumulatedNanos);
+    }
+
+    private void resetElapsedClock() {
+        elapsedClockRunning = false;
+        elapsedAccumulatedNanos = 0L;
+        elapsedSegmentStartNanos = -1L;
+        displayedElapsedSecond = -1L;
+        updateElapsedLabel(0L);
+    }
+
+    private void updateElapsedClock(long now) {
+        lastAnimationNow = now;
+        long elapsedNanos = elapsedAccumulatedNanos;
+        if (elapsedClockRunning) {
+            if (elapsedSegmentStartNanos < 0L) {
+                elapsedSegmentStartNanos = now;
+            }
+            elapsedNanos += Math.max(0L, now - elapsedSegmentStartNanos);
+        }
+        updateElapsedLabel(elapsedNanos);
+    }
+
+    private void updateElapsedLabel(long elapsedNanos) {
+        long elapsedSecond = Math.max(0L, elapsedNanos) / 1_000_000_000L;
+        if (elapsedTimeLabel != null && elapsedSecond != displayedElapsedSecond) {
+            elapsedTimeLabel.setText("Elapsed " + formatElapsedNanos(elapsedNanos));
+            displayedElapsedSecond = elapsedSecond;
+        }
+    }
+
+    static String formatElapsedNanos(long elapsedNanos) {
+        long totalSeconds = Math.max(0L, elapsedNanos) / 1_000_000_000L;
+        long hours = totalSeconds / 3_600L;
+        long minutes = totalSeconds / 60L % 60L;
+        long seconds = totalSeconds % 60L;
+        return String.format(Locale.ROOT, "%02d:%02d:%02d", hours, minutes, seconds);
     }
 
     private void draw() {
@@ -929,7 +1322,7 @@ public class BodySimulator extends Application {
 
     private Point3 curvedSpaceRenderPoint(double x, double y) {
         Point3 bent = bentGridPoint(x, y);
-        return new Point3(bent.x, bent.y, (float) (bent.z / viewScale));
+        return new Point3(bent.x, bent.y, bent.z);
     }
 
     private void drawGravityGrid(GraphicsContext gc, double width, double height) {
@@ -941,8 +1334,8 @@ public class BodySimulator extends Application {
             int end = start + gridLineLengths[line];
             for (int point = start + 1; point < end; point++) {
                 strokeProjectedGridLine(gc,
-                        gridPointX[point - 1], gridPointY[point - 1], gridPointZ[point - 1] / viewScale,
-                        gridPointX[point], gridPointY[point], gridPointZ[point] / viewScale,
+                        gridPointX[point - 1], gridPointY[point - 1], gridPointZ[point - 1],
+                        gridPointX[point], gridPointY[point], gridPointZ[point],
                         cachedGridSampleStep, projection);
             }
         }
@@ -952,35 +1345,85 @@ public class BodySimulator extends Application {
         if (!gridGeometryDirty
                 && Double.compare(cachedGridWidth, width) == 0
                 && Double.compare(cachedGridHeight, height) == 0
-                && Double.compare(cachedGridViewScale, viewScale) == 0) {
+                && Double.compare(cachedGridViewScale, viewScale) == 0
+                && Double.compare(cachedGridViewCenterX, viewCenterX) == 0
+                && Double.compare(cachedGridViewCenterY, viewCenterY) == 0
+                && Double.compare(cachedGridViewCenterZ, viewCenterZ) == 0
+                && Double.compare(cachedGridCameraYaw, cameraYaw) == 0
+                && Double.compare(cachedGridCameraPitch, cameraPitch) == 0
+                && Double.compare(cachedGridCameraRoll, cameraRoll) == 0) {
             return;
         }
 
         double worldWidth = width / viewScale;
         double worldHeight = height / viewScale;
-        double overscan = Math.max(GRID_STEP * 8.0, Math.max(worldWidth, worldHeight) * GRID_OVERSCAN_WORLD_RATIO);
-        double worldLeft = -worldWidth * 0.5 - overscan;
-        double worldRight = worldWidth * 0.5 + overscan;
-        double worldTop = worldHeight * 0.5 + overscan;
-        double worldBottom = -worldHeight * 0.5 - overscan;
+        double[][] corners = canvasCorners(width, height);
+        double worldLeft = Double.POSITIVE_INFINITY;
+        double worldRight = Double.NEGATIVE_INFINITY;
+        double worldTop = Double.NEGATIVE_INFINITY;
+        double worldBottom = Double.POSITIVE_INFINITY;
+        for (double[] corner : corners) {
+            worldLeft = Math.min(worldLeft, corner[0]);
+            worldRight = Math.max(worldRight, corner[0]);
+            worldTop = Math.max(worldTop, corner[1]);
+            worldBottom = Math.min(worldBottom, corner[1]);
+        }
+
+        double overscan = Math.max(GRID_STEP * 8.0,
+                Math.max(worldRight - worldLeft, worldTop - worldBottom) * GRID_OVERSCAN_WORLD_RATIO);
+        overscan = Math.max(overscan, SPACE_BEND_LIMIT);
+        worldLeft -= overscan;
+        worldRight += overscan;
+        worldBottom -= overscan;
+        worldTop += overscan;
+
+        double maximumSpan = Math.max(GRID_STEP * 2.0,
+                Math.max(Math.max(worldWidth, worldHeight) * GRID_MAX_WORLD_SPAN_FACTOR,
+                        SPACE_BEND_LIMIT * 4.0));
+        double centerX = (worldLeft + worldRight) * 0.5;
+        double centerY = (worldBottom + worldTop) * 0.5;
+        if (!Double.isFinite(centerX) || !Double.isFinite(centerY)) {
+            centerX = viewCenterX;
+            centerY = viewCenterY;
+        }
+        double spanX = Math.clamp(worldRight - worldLeft, GRID_STEP * 2.0, maximumSpan);
+        double spanY = Math.clamp(worldTop - worldBottom, GRID_STEP * 2.0, maximumSpan);
+        worldLeft = centerX - spanX * 0.5;
+        worldRight = centerX + spanX * 0.5;
+        worldBottom = centerY - spanY * 0.5;
+        worldTop = centerY + spanY * 0.5;
+
         double lineStep = Math.max(GRID_STEP, GRID_MIN_LINE_SPACING_PIXELS / viewScale);
         double sampleStep = Math.max(GRID_STEP * 0.35, GRID_MIN_SAMPLE_SPACING_PIXELS / viewScale);
+        lineStep = Math.max(lineStep, Math.max(spanX, spanY) / (GRID_MAX_LINES_PER_AXIS - 1.0));
+        sampleStep = Math.max(sampleStep, Math.max(spanX, spanY) / (GRID_MAX_SAMPLES_PER_LINE - 1.0));
         float[] bent = new float[3];
         gridPointCount = 0;
         gridLineCount = 0;
 
-        for (double x = Math.floor(worldLeft / lineStep) * lineStep; x <= worldRight; x += lineStep) {
+        double firstXLine = Math.floor(worldLeft / lineStep) * lineStep;
+        double firstYLine = Math.floor(worldBottom / lineStep) * lineStep;
+        int verticalLineCount = boundedSampleCount(firstXLine, worldRight, lineStep, GRID_MAX_LINES_PER_AXIS);
+        int horizontalLineCount = boundedSampleCount(firstYLine, worldTop, lineStep, GRID_MAX_LINES_PER_AXIS);
+        int verticalSampleCount = boundedSampleCount(worldBottom, worldTop, sampleStep, GRID_MAX_SAMPLES_PER_LINE);
+        int horizontalSampleCount = boundedSampleCount(worldLeft, worldRight, sampleStep, GRID_MAX_SAMPLES_PER_LINE);
+
+        for (int line = 0; line < verticalLineCount; line++) {
+            double x = firstXLine + line * lineStep;
             int lineStart = gridPointCount;
-            for (double y = worldBottom; y <= worldTop; y += sampleStep) {
+            for (int sample = 0; sample < verticalSampleCount; sample++) {
+                double y = interpolatedSample(worldBottom, worldTop, sampleStep, sample, verticalSampleCount);
                 bentGridPointInto(x, y, bent);
                 appendGridPoint(bent);
             }
             appendGridLine(lineStart, gridPointCount - lineStart);
         }
 
-        for (double y = Math.floor(worldBottom / lineStep) * lineStep; y <= worldTop; y += lineStep) {
+        for (int line = 0; line < horizontalLineCount; line++) {
+            double y = firstYLine + line * lineStep;
             int lineStart = gridPointCount;
-            for (double x = worldLeft; x <= worldRight; x += sampleStep) {
+            for (int sample = 0; sample < horizontalSampleCount; sample++) {
+                double x = interpolatedSample(worldLeft, worldRight, sampleStep, sample, horizontalSampleCount);
                 bentGridPointInto(x, y, bent);
                 appendGridPoint(bent);
             }
@@ -990,8 +1433,26 @@ public class BodySimulator extends Application {
         cachedGridWidth = width;
         cachedGridHeight = height;
         cachedGridViewScale = viewScale;
+        cachedGridViewCenterX = viewCenterX;
+        cachedGridViewCenterY = viewCenterY;
+        cachedGridViewCenterZ = viewCenterZ;
+        cachedGridCameraYaw = cameraYaw;
+        cachedGridCameraPitch = cameraPitch;
+        cachedGridCameraRoll = cameraRoll;
         cachedGridSampleStep = sampleStep;
         gridGeometryDirty = false;
+    }
+
+    private static int boundedSampleCount(double minimum, double maximum, double step, int limit) {
+        if (!Double.isFinite(minimum) || !Double.isFinite(maximum) || !Double.isFinite(step) || step <= 0.0) {
+            return 0;
+        }
+        return Math.clamp((int) Math.ceil(Math.max(0.0, maximum - minimum) / step) + 1, 2, limit);
+    }
+
+    private static double interpolatedSample(double minimum, double maximum, double step,
+                                             int sample, int sampleCount) {
+        return sample == sampleCount - 1 ? maximum : Math.min(maximum, minimum + sample * step);
     }
 
     private void appendGridPoint(float[] point) {
@@ -1048,7 +1509,7 @@ public class BodySimulator extends Application {
             double dx = x - posX.get(i);
             double dy = y - posY.get(i);
             double dz = posZ.get(i);
-            double distance = Math.sqrt(dx * dx + dy * dy + dz * dz + SOFTENING / (viewScale * viewScale));
+            double distance = Math.sqrt(dx * dx + dy * dy + dz * dz + SOFTENING);
             potential += -G * mass.get(i) / distance;
             double slope = G * mass.get(i) / (distance * distance * distance);
             shiftX -= dx * slope * 0.00020;
@@ -1180,6 +1641,9 @@ public class BodySimulator extends Application {
         photonPath.addAll(animatedPhotonPath);
         visiblePhotonPoints = Math.min(12, photonPath.size());
         photonAnimating = photonPath.size() > visiblePhotonPoints;
+        if (!photonPath.isEmpty()) {
+            resumeElapsedClock();
+        }
     }
 
     private boolean isPhotonCaptured(double photonX, double photonY, double photonVx, double photonVy) {
@@ -1282,15 +1746,15 @@ public class BodySimulator extends Application {
     }
 
     private double[][] canvasCorners() {
-        double left = -canvas.getWidth() * 0.5 / viewScale;
-        double right = canvas.getWidth() * 0.5 / viewScale;
-        double top = canvas.getHeight() * 0.5 / viewScale;
-        double bottom = -canvas.getHeight() * 0.5 / viewScale;
+        return canvasCorners(canvas.getWidth(), canvas.getHeight());
+    }
+
+    private double[][] canvasCorners(double width, double height) {
         return new double[][]{
-                {left, top},
-                {right, top},
-                {left, bottom},
-                {right, bottom}
+                screenToWorldOnPlane(0.0, 0.0, 0.0, width, height),
+                screenToWorldOnPlane(width, 0.0, 0.0, width, height),
+                screenToWorldOnPlane(0.0, height, 0.0, width, height),
+                screenToWorldOnPlane(width, height, 0.0, width, height)
         };
     }
 
@@ -1355,12 +1819,77 @@ public class BodySimulator extends Application {
             if (i == center || !isStableOrbitCandidate(i, center)) {
                 continue;
             }
-            float dx = posX.get(i) - posX.get(center);
-            float dy = posY.get(i) - posY.get(center);
-            double radius = Math.sqrt(dx * dx + dy * dy) * viewScale;
             gc.setStroke(colors[i].deriveColor(0, 0.8, 1.2, 0.32));
-            double[] projectedCenter = projectPoint(posX.get(center), posY.get(center), posZ.get(center));
-            gc.strokeOval(projectedCenter[0] - radius, projectedCenter[1] - radius, radius * 2.0, radius * 2.0);
+            drawStableOrbitGuide(gc, i, center);
+        }
+    }
+
+    private void drawStableOrbitGuide(GraphicsContext gc, int bodyIndex, int centerIndex) {
+        double relativeX = posX.get(bodyIndex) - posX.get(centerIndex);
+        double relativeY = posY.get(bodyIndex) - posY.get(centerIndex);
+        double relativeZ = posZ.get(bodyIndex) - posZ.get(centerIndex);
+        double radius = Math.sqrt(relativeX * relativeX + relativeY * relativeY + relativeZ * relativeZ);
+        if (radius < 0.000001) {
+            return;
+        }
+
+        double e1X = relativeX / radius;
+        double e1Y = relativeY / radius;
+        double e1Z = relativeZ / radius;
+        double velocityX = velX.get(bodyIndex) - velX.get(centerIndex);
+        double velocityY = velY.get(bodyIndex) - velY.get(centerIndex);
+        double velocityZ = velZ.get(bodyIndex) - velZ.get(centerIndex);
+        double normalX = relativeY * velocityZ - relativeZ * velocityY;
+        double normalY = relativeZ * velocityX - relativeX * velocityZ;
+        double normalZ = relativeX * velocityY - relativeY * velocityX;
+        double normalLength = Math.sqrt(normalX * normalX + normalY * normalY + normalZ * normalZ);
+        if (normalLength < 0.000001) {
+            normalX = 0.0;
+            normalY = 0.0;
+            normalZ = 1.0;
+            if (Math.abs(e1Z) > 0.95) {
+                normalX = 0.0;
+                normalY = 1.0;
+                normalZ = 0.0;
+            }
+        } else {
+            normalX /= normalLength;
+            normalY /= normalLength;
+            normalZ /= normalLength;
+        }
+
+        double e2X = normalY * e1Z - normalZ * e1Y;
+        double e2Y = normalZ * e1X - normalX * e1Z;
+        double e2Z = normalX * e1Y - normalY * e1X;
+        double e2Length = Math.sqrt(e2X * e2X + e2Y * e2Y + e2Z * e2Z);
+        if (e2Length < 0.000001) {
+            return;
+        }
+        e2X /= e2Length;
+        e2Y /= e2Length;
+        e2Z /= e2Length;
+
+        double centerX = posX.get(centerIndex);
+        double centerY = posY.get(centerIndex);
+        double centerZ = posZ.get(centerIndex);
+        double[] rotated = new double[3];
+        double[] previous = new double[2];
+        double[] projected = new double[2];
+        for (int segment = 0; segment <= ORBIT_GUIDE_SEGMENTS; segment++) {
+            double angle = Math.PI * 2.0 * segment / ORBIT_GUIDE_SEGMENTS;
+            double cosine = Math.cos(angle);
+            double sine = Math.sin(angle);
+            projectPointInto(
+                    centerX + radius * (e1X * cosine + e2X * sine),
+                    centerY + radius * (e1Y * cosine + e2Y * sine),
+                    centerZ + radius * (e1Z * cosine + e2Z * sine),
+                    rotated, projected);
+            if (segment > 0) {
+                strokeClippedLine(gc, previous[0], previous[1], projected[0], projected[1], 0.0);
+            }
+            double[] swap = previous;
+            previous = projected;
+            projected = swap;
         }
     }
 
@@ -1393,29 +1922,14 @@ public class BodySimulator extends Application {
     }
 
     private void updateDashboard() {
-        dashboard.getChildren().clear();
-        Label unitsHeader = new Label("Unit calibration");
-        unitsHeader.setStyle("-fx-text-fill: #9ecfff; -fx-font-size: 12px; -fx-font-weight: bold;");
-        dashboard.getChildren().add(unitsHeader);
-
-        Label unitsExplanation = new Label(String.format(
-                "Assuming 1 simulation second = %.0f SI second and photon speed = c: "
-                        + "1 du = %.4e m (%.3f km), 1 mu = %.4e kg = %.6g solar masses (M☉), "
-                        + "and 1 solar mass (M☉) = %.6g mu. "
-                        + "This calibration follows from G = %.1f du3/(mu*s2); changing the simulation-time calibration changes both SI conversions.",
-                SI_SECONDS_PER_SIMULATION_SECOND,
-                METERS_PER_DISTANCE_UNIT, METERS_PER_DISTANCE_UNIT / 1_000.0,
-                KILOGRAMS_PER_MASS_UNIT, simulationMassUnitsToSolarMasses(1.0),
-                solarMassesToSimulationMassUnits(1.0),
-                G));
-        unitsExplanation.setWrapText(true);
-        unitsExplanation.setStyle("-fx-text-fill: #c7d6eb; -fx-font-size: 11px;");
-        dashboard.getChildren().add(unitsExplanation);
+        ensureUnitCalibrationPopover();
+        unitCalibrationExplanation.setText(unitCalibrationText());
+        dashboardDynamicContent.getChildren().clear();
 
         if (bodyCount == 0) {
             Label empty = new Label("Empty space");
             empty.setStyle("-fx-text-fill: #96a2bc;");
-            dashboard.getChildren().add(empty);
+            dashboardDynamicContent.getChildren().add(empty);
             return;
         }
         for (int i = 0; i < bodyCount; i++) {
@@ -1429,19 +1943,19 @@ public class BodySimulator extends Application {
                     velX.get(i), velY.get(i), velZ.get(i), speed, accel, nearest));
             label.setWrapText(true);
             label.setStyle("-fx-text-fill: " + toHex(colors[i]) + "; -fx-font-family: monospace; -fx-font-size: 11px;");
-            dashboard.getChildren().add(label);
+            dashboardDynamicContent.getChildren().add(label);
         }
         if (!photonPath.isEmpty()) {
             Label photonHeader = new Label("Photon");
             photonHeader.setStyle("-fx-text-fill: #fff596; -fx-font-size: 12px; -fx-font-weight: bold;");
-            dashboard.getChildren().add(photonHeader);
+            dashboardDynamicContent.getChildren().add(photonHeader);
 
             Label photonDetails = new Label(String.format(
                     "Speed %.3f du/s  Offset %.3f du  Path points %d",
                     PHOTON_LIGHT_SPEED, photonImpactParameter, photonPath.size()));
             photonDetails.setWrapText(true);
             photonDetails.setStyle("-fx-text-fill: #fffbd0; -fx-font-family: monospace; -fx-font-size: 11px;");
-            dashboard.getChildren().add(photonDetails);
+            dashboardDynamicContent.getChildren().add(photonDetails);
 
             for (int i = 0; i < bodyCount; i++) {
                 Label radius = new Label(String.format(
@@ -1449,9 +1963,35 @@ public class BodySimulator extends Application {
                         names[i], schwarzschildRadius(mass.get(i))));
                 radius.setWrapText(true);
                 radius.setStyle("-fx-text-fill: #fffbd0; -fx-font-family: monospace; -fx-font-size: 11px;");
-                dashboard.getChildren().add(radius);
+                dashboardDynamicContent.getChildren().add(radius);
             }
         }
+    }
+
+    private void ensureUnitCalibrationPopover() {
+        if (unitCalibrationHeader != null) {
+            return;
+        }
+        unitCalibrationHeader = new Label("Unit calibration");
+        unitCalibrationHeader.setStyle("-fx-text-fill: #9ecfff; -fx-font-size: 12px; -fx-font-weight: bold; -fx-cursor: hand;");
+        unitCalibrationExplanation = createPopoverContent(unitCalibrationText());
+        unitCalibrationPopover = createHoverPopover(unitCalibrationExplanation);
+        installHoverPopover(unitCalibrationHeader, unitCalibrationPopover);
+        dashboardDynamicContent = new VBox(8);
+        dashboard.getChildren().setAll(unitCalibrationHeader, dashboardDynamicContent);
+    }
+
+    private String unitCalibrationText() {
+        return String.format(
+                "Assuming 1 simulation second = %.0f SI second and photon speed = c: "
+                        + "1 du = %.4e m (%.3f km), 1 mu = %.4e kg = %.6g solar masses (M☉), "
+                        + "and 1 solar mass (M☉) = %.6g mu. "
+                        + "This calibration follows from G = %.1f du3/(mu*s2); changing the simulation-time calibration changes both SI conversions.",
+                SI_SECONDS_PER_SIMULATION_SECOND,
+                METERS_PER_DISTANCE_UNIT, METERS_PER_DISTANCE_UNIT / 1_000.0,
+                KILOGRAMS_PER_MASS_UNIT, simulationMassUnitsToSolarMasses(1.0),
+                solarMassesToSimulationMassUnits(1.0),
+                G);
     }
 
     static double simulationMassUnitsToSolarMasses(double simulationMassUnits) {
@@ -1489,12 +2029,56 @@ public class BodySimulator extends Application {
     private void zoom(double deltaY, double pivotScreenX, double pivotScreenY) {
         double oldScale = viewScale;
         double zoomFactor = deltaY > 0.0 ? 1.12 : 1.0 / 1.12;
-        viewScale = Math.clamp(viewScale * zoomFactor, MIN_VIEW_SCALE, MAX_VIEW_SCALE);
-        if (Math.abs(viewScale - oldScale) < 0.0001) {
+        double nextScale = Math.clamp(viewScale * zoomFactor, MIN_VIEW_SCALE, MAX_VIEW_SCALE);
+        if (Math.abs(nextScale - oldScale) < 0.0001) {
             return;
         }
+        double[] worldBeforeZoom = screenToWorldAtViewDepth(pivotScreenX, pivotScreenY, 0.0, oldScale);
+        viewScale = nextScale;
+        double[] worldAfterZoom = screenToWorldAtViewDepth(pivotScreenX, pivotScreenY, 0.0, viewScale);
+        viewCenterX += worldBeforeZoom[0] - worldAfterZoom[0];
+        viewCenterY += worldBeforeZoom[1] - worldAfterZoom[1];
+        viewCenterZ += worldBeforeZoom[2] - worldAfterZoom[2];
+        invalidateGridGeometry();
         draw();
         updateDashboard();
+    }
+
+    private void handleCameraKeyPressed(KeyEvent event) {
+        if (canvas.getScene() != null && canvas.getScene().getFocusOwner() instanceof Control) {
+            return;
+        }
+
+        KeyCode code = event.getCode();
+        if (code == KeyCode.HOME) {
+            recenterView();
+            draw();
+            event.consume();
+            return;
+        }
+        if (code != KeyCode.LEFT && code != KeyCode.RIGHT && code != KeyCode.UP && code != KeyCode.DOWN) {
+            return;
+        }
+
+        double acceleration = event.isShiftDown() ? CAMERA_FAST_PAN_MULTIPLIER : 1.0;
+        double horizontalStep = canvas.getWidth() / viewScale * CAMERA_PAN_VIEWPORT_FRACTION * acceleration;
+        double verticalStep = canvas.getHeight() / viewScale * CAMERA_PAN_VIEWPORT_FRACTION * acceleration;
+        double viewX = code == KeyCode.LEFT ? -horizontalStep : code == KeyCode.RIGHT ? horizontalStep : 0.0;
+        double viewY = code == KeyCode.DOWN ? -verticalStep : code == KeyCode.UP ? verticalStep : 0.0;
+        double[] worldDelta = rotateViewToWorld(viewX, viewY, 0.0, cameraYaw, cameraPitch, cameraRoll);
+        viewCenterX += worldDelta[0];
+        viewCenterY += worldDelta[1];
+        viewCenterZ += worldDelta[2];
+        invalidateGridGeometry();
+        draw();
+        event.consume();
+    }
+
+    private void recenterView() {
+        viewCenterX = 0.0;
+        viewCenterY = 0.0;
+        viewCenterZ = 0.0;
+        invalidateGridGeometry();
     }
 
     private int bodyAt(double screenX, double screenY) {
@@ -1515,9 +2099,12 @@ public class BodySimulator extends Application {
         }
 
         running = false;
+        pauseElapsedClock();
         int i = draggedBodyIndex;
-        posX.set(i, physicsX(screenX));
-        posY.set(i, physicsY(screenY));
+        double[] world = screenToWorldAtViewDepth(screenX, screenY, draggedBodyViewDepth, viewScale);
+        posX.set(i, (float) world[0]);
+        posY.set(i, (float) world[1]);
+        posZ.set(i, (float) world[2]);
         snapshotInitialState();
         updatePositionFields(i);
         clearTrails();
@@ -1555,7 +2142,7 @@ public class BodySimulator extends Application {
     private void strokeProjectedLine(GraphicsContext gc, Point3 from, Point3 to) {
         double[] fromScreen = projectPoint(from.x, from.y, from.z);
         double[] toScreen = projectPoint(to.x, to.y, to.z);
-        gc.strokeLine(fromScreen[0], fromScreen[1], toScreen[0], toScreen[1]);
+        strokeClippedLine(gc, fromScreen[0], fromScreen[1], toScreen[0], toScreen[1], 0.0);
     }
 
     void strokeProjectedGridLine(GraphicsContext gc,
@@ -1575,17 +2162,23 @@ public class BodySimulator extends Application {
         double cosRoll = projection.cosRoll;
         double sinRoll = projection.sinRoll;
 
-        double fromYawX = fromX * cosYaw + fromZ * sinYaw;
-        double fromYawZ = -fromX * sinYaw + fromZ * cosYaw;
-        double fromPitchedY = fromY * cosPitch - fromYawZ * sinPitch;
+        double relativeFromX = fromX - projection.centerX;
+        double relativeFromY = fromY - projection.centerY;
+        double relativeFromZ = fromZ - projection.centerZ;
+        double fromYawX = relativeFromX * cosYaw + relativeFromZ * sinYaw;
+        double fromYawZ = -relativeFromX * sinYaw + relativeFromZ * cosYaw;
+        double fromPitchedY = relativeFromY * cosPitch - fromYawZ * sinPitch;
         double fromRolledX = fromYawX * cosRoll - fromPitchedY * sinRoll;
         double fromRolledY = fromYawX * sinRoll + fromPitchedY * cosRoll;
         double fromScreenX = canvas.getWidth() * 0.5 + fromRolledX * viewScale;
         double fromScreenY = canvas.getHeight() * 0.5 - fromRolledY * viewScale;
 
-        double toYawX = toX * cosYaw + toZ * sinYaw;
-        double toYawZ = -toX * sinYaw + toZ * cosYaw;
-        double toPitchedY = toY * cosPitch - toYawZ * sinPitch;
+        double relativeToX = toX - projection.centerX;
+        double relativeToY = toY - projection.centerY;
+        double relativeToZ = toZ - projection.centerZ;
+        double toYawX = relativeToX * cosYaw + relativeToZ * sinYaw;
+        double toYawZ = -relativeToX * sinYaw + relativeToZ * cosYaw;
+        double toPitchedY = relativeToY * cosPitch - toYawZ * sinPitch;
         double toRolledX = toYawX * cosRoll - toPitchedY * sinRoll;
         double toRolledY = toYawX * sinRoll + toPitchedY * cosRoll;
         double toScreenX = canvas.getWidth() * 0.5 + toRolledX * viewScale;
@@ -1595,40 +2188,202 @@ public class BodySimulator extends Application {
         double sampleLength = sampleStep * viewScale;
         double maximumLength = Math.max(GRID_SEGMENT_MIN_LIMIT_PIXELS, sampleLength * GRID_SEGMENT_MAX_LENGTH_FACTOR);
         if (Double.isFinite(segmentLength) && segmentLength <= maximumLength) {
-            gc.strokeLine(fromScreenX, fromScreenY, toScreenX, toScreenY);
+            strokeClippedLine(gc, fromScreenX, fromScreenY, toScreenX, toScreenY, GRID_CLIP_MARGIN_PIXELS);
         }
+    }
+
+    private void strokeClippedLine(GraphicsContext gc, double fromX, double fromY,
+                                   double toX, double toY, double margin) {
+        if (clipLineToRectangleInto(fromX, fromY, toX, toY,
+                -margin, -margin, canvas.getWidth() + margin, canvas.getHeight() + margin, clippedLine)) {
+            gc.strokeLine(clippedLine[0], clippedLine[1], clippedLine[2], clippedLine[3]);
+        }
+    }
+
+    static double[] clipLineToRectangle(double fromX, double fromY, double toX, double toY,
+                                        double minimumX, double minimumY, double maximumX, double maximumY) {
+        double[] result = new double[4];
+        return clipLineToRectangleInto(fromX, fromY, toX, toY,
+                minimumX, minimumY, maximumX, maximumY, result) ? result : null;
+    }
+
+    private static boolean clipLineToRectangleInto(double fromX, double fromY, double toX, double toY,
+                                                   double minimumX, double minimumY,
+                                                   double maximumX, double maximumY, double[] result) {
+        if (!Double.isFinite(fromX) || !Double.isFinite(fromY)
+                || !Double.isFinite(toX) || !Double.isFinite(toY)) {
+            return false;
+        }
+        double deltaX = toX - fromX;
+        double deltaY = toY - fromY;
+        double lower = 0.0;
+        double upper = 1.0;
+        for (int boundary = 0; boundary < 4; boundary++) {
+            double direction;
+            double distance;
+            if (boundary == 0) {
+                direction = -deltaX;
+                distance = fromX - minimumX;
+            } else if (boundary == 1) {
+                direction = deltaX;
+                distance = maximumX - fromX;
+            } else if (boundary == 2) {
+                direction = -deltaY;
+                distance = fromY - minimumY;
+            } else {
+                direction = deltaY;
+                distance = maximumY - fromY;
+            }
+            if (Math.abs(direction) < 1.0e-12) {
+                if (distance < 0.0) {
+                    return false;
+                }
+                continue;
+            }
+            double ratio = distance / direction;
+            if (direction < 0.0) {
+                lower = Math.max(lower, ratio);
+            } else {
+                upper = Math.min(upper, ratio);
+            }
+            if (lower > upper) {
+                return false;
+            }
+        }
+        result[0] = fromX + lower * deltaX;
+        result[1] = fromY + lower * deltaY;
+        result[2] = fromX + upper * deltaX;
+        result[3] = fromY + upper * deltaY;
+        return true;
     }
 
     private GridProjection gridProjection() {
         return new GridProjection(
+                viewCenterX, viewCenterY, viewCenterZ,
                 Math.cos(cameraYaw), Math.sin(cameraYaw),
                 Math.cos(cameraPitch), Math.sin(cameraPitch),
                 Math.cos(cameraRoll), Math.sin(cameraRoll));
     }
 
     private double[] projectPoint(double x, double y, double z) {
-        double[] rotated = rotatePoint(x, y, z);
-        return new double[]{
-                canvas.getWidth() * 0.5 + rotated[0] * viewScale,
-                canvas.getHeight() * 0.5 - rotated[1] * viewScale
-        };
+        return projectWorldToScreen(
+                x, y, z,
+                viewCenterX, viewCenterY, viewCenterZ,
+                cameraYaw, cameraPitch, cameraRoll,
+                viewScale, canvas.getWidth(), canvas.getHeight());
     }
 
-    private double[] rotatePoint(double x, double y, double z) {
-        double cosYaw = Math.cos(cameraYaw);
-        double sinYaw = Math.sin(cameraYaw);
-        double cosPitch = Math.cos(cameraPitch);
-        double sinPitch = Math.sin(cameraPitch);
-        double cosRoll = Math.cos(cameraRoll);
-        double sinRoll = Math.sin(cameraRoll);
+    private void projectPointInto(double x, double y, double z,
+                                  double[] rotated, double[] projected) {
+        rotateWorldToViewInto(
+                x - viewCenterX, y - viewCenterY, z - viewCenterZ,
+                cameraYaw, cameraPitch, cameraRoll, rotated);
+        projected[0] = canvas.getWidth() * 0.5 + rotated[0] * viewScale;
+        projected[1] = canvas.getHeight() * 0.5 - rotated[1] * viewScale;
+    }
 
+    static double[] projectWorldToScreen(double x, double y, double z,
+                                         double centerX, double centerY, double centerZ,
+                                         double yaw, double pitch, double roll,
+                                         double scale, double width, double height) {
+        double[] rotated = rotateWorldToView(x - centerX, y - centerY, z - centerZ, yaw, pitch, roll);
+        return new double[]{width * 0.5 + rotated[0] * scale, height * 0.5 - rotated[1] * scale};
+    }
+
+    static double[] rotateWorldToView(double x, double y, double z,
+                                      double yaw, double pitch, double roll) {
+        double[] result = new double[3];
+        rotateWorldToViewInto(x, y, z, yaw, pitch, roll, result);
+        return result;
+    }
+
+    private static void rotateWorldToViewInto(double x, double y, double z,
+                                              double yaw, double pitch, double roll,
+                                              double[] result) {
+        double cosYaw = Math.cos(yaw);
+        double sinYaw = Math.sin(yaw);
+        double cosPitch = Math.cos(pitch);
+        double sinPitch = Math.sin(pitch);
+        double cosRoll = Math.cos(roll);
+        double sinRoll = Math.sin(roll);
         double yawX = x * cosYaw + z * sinYaw;
         double yawZ = -x * sinYaw + z * cosYaw;
         double pitchedY = y * cosPitch - yawZ * sinPitch;
         double viewZ = y * sinPitch + yawZ * cosPitch;
         double rolledX = yawX * cosRoll - pitchedY * sinRoll;
         double rolledY = yawX * sinRoll + pitchedY * cosRoll;
-        return new double[]{rolledX, rolledY, viewZ};
+        result[0] = rolledX;
+        result[1] = rolledY;
+        result[2] = viewZ;
+    }
+
+    static double[] rotateViewToWorld(double x, double y, double z,
+                                      double yaw, double pitch, double roll) {
+        double cosYaw = Math.cos(yaw);
+        double sinYaw = Math.sin(yaw);
+        double cosPitch = Math.cos(pitch);
+        double sinPitch = Math.sin(pitch);
+        double cosRoll = Math.cos(roll);
+        double sinRoll = Math.sin(roll);
+        double unrolledX = x * cosRoll + y * sinRoll;
+        double unrolledY = -x * sinRoll + y * cosRoll;
+        double unpitchedY = unrolledY * cosPitch + z * sinPitch;
+        double unpitchedZ = -unrolledY * sinPitch + z * cosPitch;
+        double worldX = unrolledX * cosYaw - unpitchedZ * sinYaw;
+        double worldZ = unrolledX * sinYaw + unpitchedZ * cosYaw;
+        return new double[]{worldX, unpitchedY, worldZ};
+    }
+
+    private double[] worldToView(double x, double y, double z) {
+        return rotateWorldToView(
+                x - viewCenterX, y - viewCenterY, z - viewCenterZ,
+                cameraYaw, cameraPitch, cameraRoll);
+    }
+
+    private void worldToViewInto(double x, double y, double z, double[] result) {
+        rotateWorldToViewInto(
+                x - viewCenterX, y - viewCenterY, z - viewCenterZ,
+                cameraYaw, cameraPitch, cameraRoll, result);
+    }
+
+    private double[] screenToWorldAtViewDepth(double screenX, double screenY,
+                                               double viewDepth, double scale) {
+        return unprojectScreenAtViewDepth(
+                screenX, screenY, viewDepth,
+                viewCenterX, viewCenterY, viewCenterZ,
+                cameraYaw, cameraPitch, cameraRoll,
+                scale, canvas.getWidth(), canvas.getHeight());
+    }
+
+    static double[] unprojectScreenAtViewDepth(double screenX, double screenY, double viewDepth,
+                                               double centerX, double centerY, double centerZ,
+                                               double yaw, double pitch, double roll,
+                                               double scale, double width, double height) {
+        double viewX = (screenX - width * 0.5) / scale;
+        double viewY = (height * 0.5 - screenY) / scale;
+        double[] relativeWorld = rotateViewToWorld(viewX, viewY, viewDepth, yaw, pitch, roll);
+        return new double[]{centerX + relativeWorld[0], centerY + relativeWorld[1], centerZ + relativeWorld[2]};
+    }
+
+    private double[] screenToWorldOnPlane(double screenX, double screenY, double planeZ,
+                                          double width, double height) {
+        double viewX = (screenX - width * 0.5) / viewScale;
+        double viewY = (height * 0.5 - screenY) / viewScale;
+        double[] atZeroDepth = rotateViewToWorld(
+                viewX, viewY, 0.0, cameraYaw, cameraPitch, cameraRoll);
+        double[] viewDepthDirection = rotateViewToWorld(
+                0.0, 0.0, 1.0, cameraYaw, cameraPitch, cameraRoll);
+        double requiredDepth = 0.0;
+        if (Math.abs(viewDepthDirection[2]) >= PLANE_INTERSECTION_EPSILON) {
+            requiredDepth = (planeZ - viewCenterZ - atZeroDepth[2]) / viewDepthDirection[2];
+        }
+        double maximumDepth = Math.max(
+                Math.max(width, height) / viewScale * GRID_MAX_WORLD_SPAN_FACTOR,
+                SPACE_BEND_LIMIT * 4.0);
+        requiredDepth = Math.clamp(requiredDepth, -maximumDepth, maximumDepth);
+        double[] relativeWorld = rotateViewToWorld(
+                viewX, viewY, requiredDepth, cameraYaw, cameraPitch, cameraRoll);
+        return new double[]{viewCenterX + relativeWorld[0], viewCenterY + relativeWorld[1], planeZ};
     }
 
     private void drawRotationIndicator(GraphicsContext gc) {
@@ -1643,9 +2398,16 @@ public class BodySimulator extends Application {
         gc.setLineWidth(0.8);
         gc.strokeRoundRect(centerX - 78.0, centerY - 58.0, 156.0, 116.0, 8.0, 8.0);
 
-        drawRotationAxis(gc, centerX, centerY, axisLength, rotatePoint(1.0, 0.0, 0.0), Color.CORNFLOWERBLUE, "X");
-        drawRotationAxis(gc, centerX, centerY, axisLength, rotatePoint(0.0, 1.0, 0.0), Color.LIGHTGREEN, "Y");
-        drawRotationAxis(gc, centerX, centerY, axisLength, rotatePoint(0.0, 0.0, 1.0), Color.SALMON, "Z");
+        drawRotationIndicatorBodies(gc, centerX, centerY);
+        drawRotationAxis(gc, centerX, centerY, axisLength,
+                rotateWorldToView(1.0, 0.0, 0.0, cameraYaw, cameraPitch, cameraRoll),
+                Color.CORNFLOWERBLUE, "X");
+        drawRotationAxis(gc, centerX, centerY, axisLength,
+                rotateWorldToView(0.0, 1.0, 0.0, cameraYaw, cameraPitch, cameraRoll),
+                Color.LIGHTGREEN, "Y");
+        drawRotationAxis(gc, centerX, centerY, axisLength,
+                rotateWorldToView(0.0, 0.0, 1.0, cameraYaw, cameraPitch, cameraRoll),
+                Color.SALMON, "Z");
 
         gc.setFill(Color.rgb(220, 225, 235, 0.9));
         gc.setFont(Font.font("Monospaced", 11));
@@ -1669,20 +2431,50 @@ public class BodySimulator extends Application {
         gc.fillText(label, endX + 4.0, endY + 4.0);
     }
 
-    private double screenX(float physicsX) {
-        return canvas.getWidth() * 0.5 + physicsX * viewScale;
+    private void drawRotationIndicatorBodies(GraphicsContext gc, double centerX, double centerY) {
+        if (bodyCount == 0) {
+            return;
+        }
+        double worldRadius = Math.max(0.000001,
+                Math.hypot(canvas.getWidth(), canvas.getHeight()) * 0.5 / viewScale);
+        double pixelsPerWorldUnit = Math.min(66.0, 40.0) / worldRadius;
+        for (int i = 0; i < bodyCount; i++) {
+            indicatorBodyOrder[i] = i;
+            worldToViewInto(posX.get(i), posY.get(i), posZ.get(i), indicatorViewPositions[i]);
+        }
+        for (int i = 1; i < bodyCount; i++) {
+            int bodyIndex = indicatorBodyOrder[i];
+            int insertion = i;
+            while (insertion > 0
+                    && compareIndicatorDepth(bodyIndex, indicatorBodyOrder[insertion - 1], indicatorViewPositions) < 0) {
+                indicatorBodyOrder[insertion] = indicatorBodyOrder[insertion - 1];
+                insertion--;
+            }
+            indicatorBodyOrder[insertion] = bodyIndex;
+        }
+
+        for (int orderIndex = 0; orderIndex < bodyCount; orderIndex++) {
+            int bodyIndex = indicatorBodyOrder[orderIndex];
+            double[] position = indicatorViewPositions[bodyIndex];
+            double normalizedDepth = Math.clamp(position[2] / worldRadius, -1.0, 1.0);
+            double depthCue = (normalizedDepth + 1.0) * 0.5;
+            double radius = ROTATION_INDICATOR_BODY_RADIUS * (0.72 + depthCue * 0.38);
+            double dotX = Math.clamp(centerX + position[0] * pixelsPerWorldUnit,
+                    centerX - 68.0 + radius, centerX + 68.0 - radius);
+            double dotY = Math.clamp(centerY - position[1] * pixelsPerWorldUnit,
+                    centerY - 40.0 + radius, centerY + 46.0 - radius);
+            Color bodyColor = colors[bodyIndex] == null ? Color.WHITE : colors[bodyIndex];
+            gc.setFill(bodyColor.deriveColor(0.0, 1.0, 1.0, 0.48 + depthCue * 0.48));
+            gc.fillOval(dotX - radius, dotY - radius, radius * 2.0, radius * 2.0);
+            gc.setStroke(Color.rgb(235, 240, 250, 0.35 + depthCue * 0.45));
+            gc.setLineWidth(0.65);
+            gc.strokeOval(dotX - radius, dotY - radius, radius * 2.0, radius * 2.0);
+        }
     }
 
-    private double screenY(float physicsY) {
-        return canvas.getHeight() * 0.5 - physicsY * viewScale;
-    }
-
-    private float physicsX(double screenX) {
-        return (float) ((screenX - canvas.getWidth() * 0.5) / viewScale);
-    }
-
-    private float physicsY(double screenY) {
-        return (float) ((canvas.getHeight() * 0.5 - screenY) / viewScale);
+    private static int compareIndicatorDepth(int left, int right, double[][] positions) {
+        int depthOrder = Double.compare(positions[left][2], positions[right][2]);
+        return depthOrder != 0 ? depthOrder : Integer.compare(left, right);
     }
 
     private float parse(TextField field) {
@@ -1699,7 +2491,24 @@ public class BodySimulator extends Application {
 
     @Override
     public void stop() {
+        if (simulationTimer != null) {
+            simulationTimer.stop();
+            simulationTimer = null;
+        }
+        if (dashboardDrawerTimeline != null) {
+            dashboardDrawerTimeline.stop();
+            dashboardDrawerTimeline = null;
+        }
+        hidePopover(guidePopover);
+        hidePopover(unitDescriptionPopover);
+        hidePopover(unitCalibrationPopover);
         closeExecutionPlan();
+    }
+
+    private static void hidePopover(PopOver popover) {
+        if (popover != null) {
+            popover.hide();
+        }
     }
 
     static void main(String[] args) {

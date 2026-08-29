@@ -1858,12 +1858,24 @@ public class GravityGPU extends Application {
 
     private ListCell<TornadoDeviceChoice> tornadoDeviceListCell() {
         return new ListCell<>() {
+            {
+                hoverProperty().addListener((_, _, _) -> updateCellStyle());
+            }
+
             @Override
             protected void updateItem(TornadoDeviceChoice item, boolean empty) {
                 super.updateItem(item, empty);
                 setText(empty || item == null ? null : item.toString());
                 setTextFill(Color.WHITE);
-                setStyle("-fx-background-color: #1b2533;");
+                updateCellStyle();
+            }
+
+            private void updateCellStyle() {
+                setStyle(isEmpty()
+                        ? ""
+                        : isHover()
+                                ? "-fx-background-color: #365f85;"
+                                : "-fx-background-color: #1b2533;");
             }
         };
     }

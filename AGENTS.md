@@ -19,6 +19,10 @@ This repository uses project-scoped custom agents from `.codex/agents/` and the
   phase coordinators. Phase coordinators are alternative entry points for
   single-phase work. Leaf agents do not create more agents unless explicitly
   asked. This bounded hierarchy avoids recursive delegation and wasted context.
+- After every implementation task completes its test, quality, and build gates,
+  delegate a final README review to `readme_updater`. It owns only `README.md`,
+  uses CodeGraph first and IntelliJ MCP as fallback, and must report either
+  `documentation_result = UPDATED` or `documentation_result = NO_CHANGE`.
 
 ## Risk-based routing
 

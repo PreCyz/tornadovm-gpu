@@ -22,7 +22,7 @@ The important design boundary is:
 | `5` | Solar System | Sun, eight planets, rings, orbits, and animated surfaces | TornadoVM per-pixel kernel |
 | `6` | CPU gravity | Interactive n-body simulation with trails and body creation | CPU pairwise forces and Verlet integration |
 | `7` | GPU gravity | Interactive n-body simulation, dashboard, editable bodies, and camera rotation | TornadoVM force, integration, and projection kernels |
-| `8` | GPU body simulator | Editable bodies, stable-orbit tools, photons, black-hole capture, trails, and a curved gravity grid | TornadoVM simulation with JavaFX visualization |
+| `8` | GPU body simulator | Editable/removable bodies, hover help, circular-orbit reference guides, photons, black-hole capture, trails, camera pan/rotation, and a curved gravity grid | TornadoVM integration with JavaFX visualization |
 
 The heat equation uses the five-point stencil:
 
@@ -31,6 +31,47 @@ next = current + alpha * (top + bottom + left + right - 4 * current)
 ```
 
 The gravity demos initialize circular orbits from Kepler-style velocities and compensate the central body's momentum. They are educational simulations rather than high-precision ephemeris software.
+
+## GPU body simulator interaction
+
+Demo `8` is an interactive JavaFX view over the `pawg.body` n-body state. The
+GPU task graph performs the regular acceleration and Velocity-Verlet update;
+the JavaFX Application Thread owns body editing, collision orchestration,
+device-plan lifecycle, dashboard refreshes, camera input, and drawing. Position
+and velocity are transferred back after each executed simulation step so the
+dashboard and canvas show the synchronized host snapshot.
+
+- Use **+** to add an editable body. Editing while stopped still works as
+  before; adding a body while running keeps the simulation running, fully
+  initializes the new body, and the next device execution picks it up through
+  the mutable-state upload without a plan rebuild or restart.
+- Drag a body to reposition it. Drag empty canvas space to yaw/pitch; hold
+  Shift or use the right mouse button on empty space to roll. Dragging a body
+  pauses the elapsed clock until the drag ends. Scroll zooms.
+- Arrow keys pan the camera along the visible plane; hold Shift for a larger
+  pan and press Home to recenter. Right-clicking a body removes that exact body,
+  compacts the simulation state, and makes the resulting state the new Reset
+  snapshot.
+- The dashboard edge buttons hide and show the drawer, and the device combo box
+  highlights on hover so the accelerator choice is easier to spot.
+- Hover **Guide**, **Unit description**, or the dashboard's **Unit
+  calibration** label to read the associated explanation without permanently
+  using sidebar space. These are ControlsFX PopOvers and close when the pointer
+  leaves the label.
+- Trails, full tracks, Schwarzschild-radius overlays, photon tracing, and
+  circular-orbit reference guides are optional visualization aids. The current
+  circular-orbit classifier is heuristic: it does not correctly account for
+  gravitational softening, radial versus tangential relative velocity,
+  candidate-body mass, or third-body perturbations. It can therefore draw a
+  circle that a body will not follow; treat it as a visual reference, not an
+  orbit prediction. The curved gravity grid uses the physical `SOFTENING`
+  constant rather than zoom level, and collision merges invalidate the grid
+  geometry so the next draw reflects the new mass distribution.
+
+The elapsed label beside **Body Simulator** shows `Elapsed HH:MM:SS`. It starts
+or resumes on **Start** or after a successful **Photon** shot, resets and stops
+on **Reset** or a device reset, pauses while a body is being dragged, and is
+unaffected by live body insertion or collision merges.
 
 ## Requirements
 
