@@ -17,6 +17,8 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class BodySimulatorGridRenderingTest {
@@ -80,6 +82,53 @@ class BodySimulatorGridRenderingTest {
                 "a projected chord much longer than the grid sampling distance must be rejected");
     }
 
+    @Test
+    void unchangedPausedGridReusesCachedGeometry() throws Exception {
+        BodySimulator simulator = newSimulatorWithBody(0.0f, 0.0f, 0.0f, 100.0f);
+        invokeGridRebuild(simulator, 800.0, 600.0);
+
+        float[] firstX = (float[]) field(simulator, "gridPointX");
+        int firstPointCount = (int) field(simulator, "gridPointCount");
+        int firstLineCount = (int) field(simulator, "gridLineCount");
+        assertFalse((boolean) field(simulator, "gridGeometryDirty"));
+
+        invokeGridRebuild(simulator, 800.0, 600.0);
+
+        assertSame(firstX, field(simulator, "gridPointX"), "cache hit must reuse the backing geometry");
+        assertEquals(firstPointCount, field(simulator, "gridPointCount"));
+        assertEquals(firstLineCount, field(simulator, "gridLineCount"));
+    }
+
+    @Test
+    void adaptiveSamplingMaintainsPixelDensityAtMinimumZoom() throws Exception {
+        BodySimulator simulator = newSimulatorWithBody(0.0f, 0.0f, 0.0f, 100.0f);
+        setField(simulator, "viewScale", 16.0);
+
+        invokeGridRebuild(simulator, 800.0, 600.0);
+
+        double sampleStep = (double) field(simulator, "cachedGridSampleStep");
+        assertTrue(sampleStep * 16.0 >= 4.0 - 1.0e-9,
+                "adaptive samples must stay at least four pixels apart");
+        assertTrue((int) field(simulator, "gridPointCount") > 0);
+        assertTrue((int) field(simulator, "gridLineCount") > 0);
+        assertFiniteGridPoints(simulator);
+    }
+
+    @Test
+    void scaleChangeInvalidatesTheGridCacheKey() throws Exception {
+        BodySimulator simulator = newSimulatorWithBody(0.0f, 0.0f, 0.0f, 100.0f);
+        invokeGridRebuild(simulator, 800.0, 600.0);
+        int initialPointCount = (int) field(simulator, "gridPointCount");
+
+        setField(simulator, "viewScale", 16.0);
+        invokeGridRebuild(simulator, 800.0, 600.0);
+
+        assertEquals(16.0, (double) field(simulator, "cachedGridViewScale"));
+        assertTrue(initialPointCount != (int) field(simulator, "gridPointCount"),
+                "a zoom change must rebuild geometry with adaptive density");
+        assertFiniteGridPoints(simulator);
+    }
+
     private static WritableImage renderGridSegment(float fromX, float toX) throws Exception {
         return onFxThread(() -> {
             BodySimulator simulator = new BodySimulator();
@@ -89,12 +138,9 @@ class BodySimulatorGridRenderingTest {
             graphics.setStroke(Color.WHITE);
             graphics.setLineWidth(1.0);
 
-            Object from = point(fromX, 0.0f, 0.0f);
-            Object to = point(toX, 0.0f, 0.0f);
-            Method stroke = BodySimulator.class.getDeclaredMethod(
-                    "strokeProjectedGridLine", GraphicsContext.class, from.getClass(), to.getClass());
-            stroke.setAccessible(true);
-            stroke.invoke(simulator, graphics, from, to);
+            simulator.strokeProjectedGridLine(graphics,
+                    (double) fromX, 0.0, 0.0,
+                    (double) toX, 0.0, 0.0, 0.35);
 
             SnapshotParameters snapshotParameters = new SnapshotParameters();
             snapshotParameters.setFill(Color.TRANSPARENT);
@@ -135,13 +181,6 @@ class BodySimulatorGridRenderingTest {
         return new double[]{((Number) pointX.invoke(point)).doubleValue(), ((Number) pointY.invoke(point)).doubleValue()};
     }
 
-    private static Object point(float x, float y, float z) throws Exception {
-        Class<?> pointType = Class.forName("pawg.body.BodySimulator$Point3");
-        var constructor = pointType.getDeclaredConstructor(float.class, float.class, float.class);
-        constructor.setAccessible(true);
-        return constructor.newInstance(x, y, z);
-    }
-
     private static FloatArray mass(BodySimulator simulator) throws Exception {
         return position(simulator, "mass");
     }
@@ -150,6 +189,30 @@ class BodySimulatorGridRenderingTest {
         Field field = BodySimulator.class.getDeclaredField(name);
         field.setAccessible(true);
         return (FloatArray) field.get(simulator);
+    }
+
+    private static void invokeGridRebuild(BodySimulator simulator, double width, double height) throws Exception {
+        Method rebuild = BodySimulator.class.getDeclaredMethod(
+                "rebuildGridGeometryIfNeeded", double.class, double.class);
+        rebuild.setAccessible(true);
+        rebuild.invoke(simulator, width, height);
+    }
+
+    private static void assertFiniteGridPoints(BodySimulator simulator) throws Exception {
+        int count = (int) field(simulator, "gridPointCount");
+        float[] x = (float[]) field(simulator, "gridPointX");
+        float[] y = (float[]) field(simulator, "gridPointY");
+        float[] z = (float[]) field(simulator, "gridPointZ");
+        for (int i = 0; i < count; i++) {
+            assertTrue(Float.isFinite(x[i]) && Float.isFinite(y[i]) && Float.isFinite(z[i]),
+                    "grid point " + i + " must be finite");
+        }
+    }
+
+    private static Object field(BodySimulator simulator, String name) throws Exception {
+        Field field = BodySimulator.class.getDeclaredField(name);
+        field.setAccessible(true);
+        return field.get(simulator);
     }
 
     private static void setField(BodySimulator simulator, String name, Object value) throws Exception {

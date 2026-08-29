@@ -16,7 +16,8 @@ import javafx.stage.Screen;
 import javafx.stage.Stage;
 import pawg.nbody.TornadoDeviceChoice;
 import pawg.nbody.TornadoDeviceSelector;
-import uk.ac.manchester.tornado.api.*;
+import uk.ac.manchester.tornado.api.TaskGraph;
+import uk.ac.manchester.tornado.api.TornadoExecutionPlan;
 import uk.ac.manchester.tornado.api.common.TornadoDevice;
 import uk.ac.manchester.tornado.api.enums.DataTransferMode;
 import uk.ac.manchester.tornado.api.types.arrays.FloatArray;
@@ -44,6 +45,8 @@ public class BodySimulator extends Application {
     private static final double GRID_LATERAL_BEND_LIMIT = GRID_STEP * 2.0;
     private static final double GRID_SEGMENT_MAX_LENGTH_FACTOR = 6.0;
     private static final double GRID_SEGMENT_MIN_LIMIT_PIXELS = 48.0;
+    private static final double GRID_MIN_LINE_SPACING_PIXELS = 10.0;
+    private static final double GRID_MIN_SAMPLE_SPACING_PIXELS = 4.0;
     private static final int PHOTON_MIN_STEPS = 900;
     private static final int PHOTON_MAX_STEPS = 60_000;
     private static final double PHOTON_STEP_DISTANCE = 0.08;
@@ -71,6 +74,7 @@ public class BodySimulator extends Application {
     private static final double CAMERA_PITCH_MAX = Math.PI * 0.48;
     private static final double CAMERA_DRAG_SENSITIVITY = 0.006;
     private static final int FULL_TRACK_RENDER_POINT_LIMIT = 2_000;
+    private static final boolean CPU_PHYSICS = Boolean.getBoolean("pawg.body.cpu");
     private static final String GREEN_BUTTON_STYLE = "-fx-background-color: #1d2b24; -fx-text-fill: #00ff88; -fx-border-color: #00aa66; -fx-font-weight: bold; -fx-cursor: hand;";
     private static final String RED_BUTTON_STYLE = "-fx-background-color: #222; -fx-text-fill: #ff4444; -fx-border-color: #ff4444; -fx-font-weight: bold; -fx-cursor: hand;";
     private static final String BLUE_BUTTON_STYLE = "-fx-background-color: #1b2533; -fx-text-fill: #9ecfff; -fx-border-color: #497aa5; -fx-font-weight: bold; -fx-cursor: hand;";
@@ -148,8 +152,26 @@ public class BodySimulator extends Application {
     private boolean rotatingCamera;
     private boolean rotatingRoll;
     private int mergedBodySequence;
+    private float[] gridPointX = new float[0];
+    private float[] gridPointY = new float[0];
+    private float[] gridPointZ = new float[0];
+    private int[] gridLineStarts = new int[0];
+    private int[] gridLineLengths = new int[0];
+    private int gridPointCount;
+    private int gridLineCount;
+    private boolean gridGeometryDirty = true;
+    private double cachedGridWidth = Double.NaN;
+    private double cachedGridHeight = Double.NaN;
+    private double cachedGridViewScale = Double.NaN;
+    private double cachedGridSampleStep = GRID_STEP * 0.35;
 
     private record Point3(float x, float y, float z) {
+    }
+
+    private record GridProjection(
+            double cosYaw, double sinYaw,
+            double cosPitch, double sinPitch,
+            double cosRoll, double sinRoll) {
     }
 
     @Override
@@ -300,9 +322,7 @@ public class BodySimulator extends Application {
             @Override
             public void handle(long now) {
                 if (running && bodyCount > 0) {
-                    rebuildPlanIfNeeded();
-                    TornadoExecutionResult result = executionPlan.execute();
-                    result.transferToHost(posX, posY, posZ, velX, velY, velZ, accX, accY, accZ);
+                    stepSimulation();
                     resolveBodyCollisions();
                     if (showTrails && frame % 2 == 0) {
                         appendTrails();
@@ -358,8 +378,7 @@ public class BodySimulator extends Application {
     private void changeDevice(Stage stage, TornadoDeviceChoice deviceChoice) {
         selectedDeviceChoice = deviceChoice;
         selectedDevice = TornadoDeviceSelector.resolveDevice(stage, deviceChoice);
-        executionPlan = null;
-        planDirty = true;
+        invalidateExecutionPlan();
         resetToInitialState();
     }
 
@@ -368,7 +387,7 @@ public class BodySimulator extends Application {
             snapshotInitialState();
         }
         running = true;
-        planDirty = true;
+        invalidateExecutionPlan();
         clearTrails();
         clearFullTracks();
         clearPhotonPath();
@@ -386,7 +405,7 @@ public class BodySimulator extends Application {
         state.set(0, bodyCount);
         snapshotInitialState();
         rebuildEditors();
-        planDirty = true;
+        invalidateExecutionPlan();
         draw();
         updateDashboard();
     }
@@ -443,7 +462,7 @@ public class BodySimulator extends Application {
         clearTrails();
         clearFullTracks();
         clearPhotonPath();
-        planDirty = true;
+        invalidateExecutionPlan();
         rebuildEditors();
         draw();
         updateDashboard();
@@ -479,7 +498,7 @@ public class BodySimulator extends Application {
 
         if (mergedAny) {
             state.set(0, bodyCount);
-            planDirty = true;
+            invalidateExecutionPlan();
             clearTrails();
             clearFullTracks();
             clearPhotonPath();
@@ -605,7 +624,7 @@ public class BodySimulator extends Application {
             try {
                 setBody(i, parse(x), parse(y), parse(z), parse(vx), parse(vy), parse(vz), parse(m));
                 snapshotInitialState();
-                planDirty = true;
+                invalidateExecutionPlan();
                 clearTrails();
                 clearFullTracks();
                 clearPhotonPath();
@@ -681,15 +700,62 @@ public class BodySimulator extends Application {
         if (!planDirty && executionPlan != null) {
             return;
         }
+        closeExecutionPlan();
         TaskGraph graph = new TaskGraph("body-simulator")
-                .transferToDevice(DataTransferMode.EVERY_EXECUTION, posX, posY, posZ, velX, velY, velZ, mass, active, params, state)
-                .transferToDevice(DataTransferMode.FIRST_EXECUTION, accX, accY, accZ, nextAccX, nextAccY, nextAccZ)
-                .task("simulate", BodyPhysicsKernels::simulate,
-                        posX, posY, posZ, velX, velY, velZ, accX, accY, accZ, nextAccX, nextAccY, nextAccZ,
-                        mass, active, params, state)
+                .transferToDevice(DataTransferMode.FIRST_EXECUTION,
+                        posX, posY, posZ, velX, velY, velZ, accX, accY, accZ,
+                        nextAccX, nextAccY, nextAccZ, mass, active, params, state)
+                .task("current-acceleration", BodyPhysicsKernels::computeAcceleration,
+                        posX, posY, posZ, accX, accY, accZ, mass, active, params, state)
+                .task("position-update", BodyPhysicsKernels::updatePositions,
+                        posX, posY, posZ, velX, velY, velZ, accX, accY, accZ, active, params, state)
+                .task("next-acceleration-velocity-update", BodyPhysicsKernels::computeNextAccelerationAndUpdateVelocity,
+                        posX, posY, posZ, velX, velY, velZ, accX, accY, accZ,
+                        nextAccX, nextAccY, nextAccZ, mass, active, params, state)
                 .transferToHost(DataTransferMode.EVERY_EXECUTION, posX, posY, posZ, velX, velY, velZ, accX, accY, accZ);
-        executionPlan = TornadoDeviceSelector.applyDevice(new TornadoExecutionPlan(graph.snapshot()), selectedDevice);
+        TornadoExecutionPlan nextPlan = new TornadoExecutionPlan(graph.snapshot());
+        try {
+            executionPlan = TornadoDeviceSelector.applyDevice(nextPlan, selectedDevice);
+        } catch (RuntimeException | Error failure) {
+            closePlanQuietly(nextPlan);
+            throw failure;
+        }
         planDirty = false;
+    }
+
+    private void stepSimulation() {
+        if (CPU_PHYSICS) {
+            BodyPhysicsKernels.simulateOnCpu(
+                    posX, posY, posZ, velX, velY, velZ, accX, accY, accZ,
+                    nextAccX, nextAccY, nextAccZ, mass, active, params, state);
+        } else {
+            rebuildPlanIfNeeded();
+            executionPlan.execute();
+        }
+        gridGeometryDirty = true;
+    }
+
+    private void invalidateExecutionPlan() {
+        planDirty = true;
+        gridGeometryDirty = true;
+        closeExecutionPlan();
+    }
+
+    private void closeExecutionPlan() {
+        TornadoExecutionPlan currentPlan = executionPlan;
+        executionPlan = null;
+        closePlanQuietly(currentPlan);
+    }
+
+    private static void closePlanQuietly(TornadoExecutionPlan plan) {
+        if (plan == null) {
+            return;
+        }
+        try {
+            plan.close();
+        } catch (Exception _) {
+            // Closing is best effort; TornadoVM can reclaim stale device memory.
+        }
     }
 
     private void appendTrails() {
@@ -868,6 +934,28 @@ public class BodySimulator extends Application {
 
     private void drawGravityGrid(GraphicsContext gc, double width, double height) {
         gc.setStroke(Color.rgb(27, 38, 58));
+        rebuildGridGeometryIfNeeded(width, height);
+        GridProjection projection = gridProjection();
+        for (int line = 0; line < gridLineCount; line++) {
+            int start = gridLineStarts[line];
+            int end = start + gridLineLengths[line];
+            for (int point = start + 1; point < end; point++) {
+                strokeProjectedGridLine(gc,
+                        gridPointX[point - 1], gridPointY[point - 1], gridPointZ[point - 1] / viewScale,
+                        gridPointX[point], gridPointY[point], gridPointZ[point] / viewScale,
+                        cachedGridSampleStep, projection);
+            }
+        }
+    }
+
+    private void rebuildGridGeometryIfNeeded(double width, double height) {
+        if (!gridGeometryDirty
+                && Double.compare(cachedGridWidth, width) == 0
+                && Double.compare(cachedGridHeight, height) == 0
+                && Double.compare(cachedGridViewScale, viewScale) == 0) {
+            return;
+        }
+
         double worldWidth = width / viewScale;
         double worldHeight = height / viewScale;
         double overscan = Math.max(GRID_STEP * 8.0, Math.max(worldWidth, worldHeight) * GRID_OVERSCAN_WORLD_RATIO);
@@ -875,33 +963,81 @@ public class BodySimulator extends Application {
         double worldRight = worldWidth * 0.5 + overscan;
         double worldTop = worldHeight * 0.5 + overscan;
         double worldBottom = -worldHeight * 0.5 - overscan;
+        double lineStep = Math.max(GRID_STEP, GRID_MIN_LINE_SPACING_PIXELS / viewScale);
+        double sampleStep = Math.max(GRID_STEP * 0.35, GRID_MIN_SAMPLE_SPACING_PIXELS / viewScale);
+        float[] bent = new float[3];
+        gridPointCount = 0;
+        gridLineCount = 0;
 
-        for (double x = Math.floor(worldLeft / GRID_STEP) * GRID_STEP; x <= worldRight; x += GRID_STEP) {
-            Point3 previous = null;
-            for (double y = worldBottom; y <= worldTop; y += GRID_STEP * 0.35) {
-                Point3 current = bentGridPoint(x, y);
-                if (previous != null) {
-                    strokeProjectedGridLine(gc, new Point3(previous.x, previous.y, (float) (previous.z / viewScale)),
-                            new Point3(current.x, current.y, (float) (current.z / viewScale)));
-                }
-                previous = current;
+        for (double x = Math.floor(worldLeft / lineStep) * lineStep; x <= worldRight; x += lineStep) {
+            int lineStart = gridPointCount;
+            for (double y = worldBottom; y <= worldTop; y += sampleStep) {
+                bentGridPointInto(x, y, bent);
+                appendGridPoint(bent);
             }
+            appendGridLine(lineStart, gridPointCount - lineStart);
         }
 
-        for (double y = Math.floor(worldBottom / GRID_STEP) * GRID_STEP; y <= worldTop; y += GRID_STEP) {
-            Point3 previous = null;
-            for (double x = worldLeft; x <= worldRight; x += GRID_STEP * 0.35) {
-                Point3 current = bentGridPoint(x, y);
-                if (previous != null) {
-                    strokeProjectedGridLine(gc, new Point3(previous.x, previous.y, (float) (previous.z / viewScale)),
-                            new Point3(current.x, current.y, (float) (current.z / viewScale)));
-                }
-                previous = current;
+        for (double y = Math.floor(worldBottom / lineStep) * lineStep; y <= worldTop; y += lineStep) {
+            int lineStart = gridPointCount;
+            for (double x = worldLeft; x <= worldRight; x += sampleStep) {
+                bentGridPointInto(x, y, bent);
+                appendGridPoint(bent);
             }
+            appendGridLine(lineStart, gridPointCount - lineStart);
         }
+
+        cachedGridWidth = width;
+        cachedGridHeight = height;
+        cachedGridViewScale = viewScale;
+        cachedGridSampleStep = sampleStep;
+        gridGeometryDirty = false;
+    }
+
+    private void appendGridPoint(float[] point) {
+        ensureGridPointCapacity(gridPointCount + 1);
+        gridPointX[gridPointCount] = point[0];
+        gridPointY[gridPointCount] = point[1];
+        gridPointZ[gridPointCount] = point[2];
+        gridPointCount++;
+    }
+
+    private void appendGridLine(int start, int length) {
+        if (length < 2) {
+            return;
+        }
+        ensureGridLineCapacity(gridLineCount + 1);
+        gridLineStarts[gridLineCount] = start;
+        gridLineLengths[gridLineCount] = length;
+        gridLineCount++;
+    }
+
+    private void ensureGridPointCapacity(int required) {
+        if (required <= gridPointX.length) {
+            return;
+        }
+        int capacity = Math.max(required, Math.max(4_096, gridPointX.length * 2));
+        gridPointX = Arrays.copyOf(gridPointX, capacity);
+        gridPointY = Arrays.copyOf(gridPointY, capacity);
+        gridPointZ = Arrays.copyOf(gridPointZ, capacity);
+    }
+
+    private void ensureGridLineCapacity(int required) {
+        if (required <= gridLineStarts.length) {
+            return;
+        }
+        int capacity = Math.max(required, Math.max(256, gridLineStarts.length * 2));
+        gridLineStarts = Arrays.copyOf(gridLineStarts, capacity);
+        gridLineLengths = Arrays.copyOf(gridLineLengths, capacity);
     }
 
     private Point3 bentGridPoint(double x, double y) {
+        float[] bent = new float[3];
+        bentGridPointInto(x, y, bent);
+        return new Point3(bent[0], bent[1], bent[2]);
+    }
+
+    private void bentGridPointInto(double x, double y, float[] result) {
         double potential = 0.0;
         double shiftX = 0.0;
         double shiftY = 0.0;
@@ -929,7 +1065,9 @@ public class BodySimulator extends Application {
         }
 
         double visualDepth = Math.max(-SPACE_BEND_LIMIT, potential * SPACE_BEND_SCALE);
-        return new Point3((float) (x + shiftX), (float) (y + shiftY), (float) visualDepth);
+        result[0] = (float) (x + shiftX);
+        result[1] = (float) (y + shiftY);
+        result[2] = (float) visualDepth;
     }
 
     private void askPhotonOffsetAndShoot(Stage stage) {
@@ -1081,7 +1219,7 @@ public class BodySimulator extends Application {
     }
 
     private double photonLineDistance(double photonX, double photonY, double photonVx, double photonVy,
-            double bodyX, double bodyY) {
+                                      double bodyX, double bodyY) {
         return Math.abs((bodyX - photonX) * photonVy - (bodyY - photonY) * photonVx);
     }
 
@@ -1165,46 +1303,46 @@ public class BodySimulator extends Application {
                 continue;
             }
             double centerX = posX.get(i);
-        double centerY = posY.get(i);
-        double centerZ = posZ.get(i);
-        double radius = schwarzschildRadius(mass.get(i));
-        Color guideColor = colors[i].interpolate(Color.WHITE, 0.55).deriveColor(0.0, 1.0, 1.0, 0.85);
-        gc.setStroke(guideColor);
-        double labelX = Double.NaN;
-        double labelY = Double.NaN;
-        gc.beginPath();
-        for (int segment = 0; segment <= SCHWARZSCHILD_GUIDE_SEGMENTS; segment++) {
-            double angle = Math.PI * 2.0 * segment / SCHWARZSCHILD_GUIDE_SEGMENTS;
-            double[] projected = projectPoint(
-                    centerX + Math.cos(angle) * radius,
+            double centerY = posY.get(i);
+            double centerZ = posZ.get(i);
+            double radius = schwarzschildRadius(mass.get(i));
+            Color guideColor = colors[i].interpolate(Color.WHITE, 0.55).deriveColor(0.0, 1.0, 1.0, 0.85);
+            gc.setStroke(guideColor);
+            double labelX = Double.NaN;
+            double labelY = Double.NaN;
+            gc.beginPath();
+            for (int segment = 0; segment <= SCHWARZSCHILD_GUIDE_SEGMENTS; segment++) {
+                double angle = Math.PI * 2.0 * segment / SCHWARZSCHILD_GUIDE_SEGMENTS;
+                double[] projected = projectPoint(
+                        centerX + Math.cos(angle) * radius,
                         centerY + Math.sin(angle) * radius,
                         centerZ);
                 if (segment == 0) {
                     gc.moveTo(projected[0], projected[1]);
-            } else {
-                gc.lineTo(projected[0], projected[1]);
+                } else {
+                    gc.lineTo(projected[0], projected[1]);
+                }
+                boolean labelFits = projected[0] >= 8.0 && projected[0] <= canvas.getWidth() - 100.0
+                        && projected[1] >= 18.0 && projected[1] <= canvas.getHeight() - 8.0;
+                if (labelFits && (Double.isNaN(labelY) || projected[1] < labelY)) {
+                    labelX = projected[0];
+                    labelY = projected[1];
+                }
             }
-            boolean labelFits = projected[0] >= 8.0 && projected[0] <= canvas.getWidth() - 100.0
-                    && projected[1] >= 18.0 && projected[1] <= canvas.getHeight() - 8.0;
-            if (labelFits && (Double.isNaN(labelY) || projected[1] < labelY)) {
-                labelX = projected[0];
-                labelY = projected[1];
+            gc.closePath();
+            gc.stroke();
+            if (!Double.isNaN(labelY)) {
+                gc.setLineDashes();
+                gc.setFont(Font.font("Monospaced", 11));
+                gc.setTextAlign(TextAlignment.LEFT);
+                gc.setTextBaseline(VPos.BOTTOM);
+                gc.setFill(Color.rgb(4, 6, 12, 0.92));
+                gc.fillText("Event horizon", labelX + 7.0, labelY - 3.0);
+                gc.setFill(guideColor);
+                gc.fillText("Event horizon", labelX + 6.0, labelY - 4.0);
+                gc.setLineDashes(10.0, 7.0);
             }
         }
-        gc.closePath();
-        gc.stroke();
-        if (!Double.isNaN(labelY)) {
-            gc.setLineDashes();
-            gc.setFont(Font.font("Monospaced", 11));
-            gc.setTextAlign(TextAlignment.LEFT);
-            gc.setTextBaseline(VPos.BOTTOM);
-            gc.setFill(Color.rgb(4, 6, 12, 0.92));
-            gc.fillText("Event horizon", labelX + 7.0, labelY - 3.0);
-            gc.setFill(guideColor);
-            gc.fillText("Event horizon", labelX + 6.0, labelY - 4.0);
-            gc.setLineDashes(10.0, 7.0);
-        }
-    }
         gc.restore();
     }
 
@@ -1262,11 +1400,13 @@ public class BodySimulator extends Application {
 
         Label unitsExplanation = new Label(String.format(
                 "Assuming 1 simulation second = %.0f SI second and photon speed = c: "
-                        + "1 du = %.4e m (%.3f km), 1 mu = %.4e kg (%.4f solar masses). "
+                        + "1 du = %.4e m (%.3f km), 1 mu = %.4e kg = %.6g solar masses (M☉), "
+                        + "and 1 solar mass (M☉) = %.6g mu. "
                         + "This calibration follows from G = %.1f du3/(mu*s2); changing the simulation-time calibration changes both SI conversions.",
                 SI_SECONDS_PER_SIMULATION_SECOND,
                 METERS_PER_DISTANCE_UNIT, METERS_PER_DISTANCE_UNIT / 1_000.0,
-                KILOGRAMS_PER_MASS_UNIT, KILOGRAMS_PER_MASS_UNIT / SI_SOLAR_MASS_KILOGRAMS,
+                KILOGRAMS_PER_MASS_UNIT, simulationMassUnitsToSolarMasses(1.0),
+                solarMassesToSimulationMassUnits(1.0),
                 G));
         unitsExplanation.setWrapText(true);
         unitsExplanation.setStyle("-fx-text-fill: #c7d6eb; -fx-font-size: 11px;");
@@ -1283,8 +1423,9 @@ public class BodySimulator extends Application {
             float accel = (float) Math.sqrt(accX.get(i) * accX.get(i) + accY.get(i) * accY.get(i) + accZ.get(i) * accZ.get(i));
             String nearest = nearestBodyText(i);
             Label label = new Label(String.format(
-                    "%s  M %.3f mu  P(%.3f, %.3f, %.3f) du  V(%.3f, %.3f, %.3f) du/s  |V| %.3f du/s  |A| %.5f du/s2  %s",
-                    names[i], mass.get(i), posX.get(i), posY.get(i), posZ.get(i),
+                    "%s  M %.6g mu (%.6g M☉)  P(%.3f, %.3f, %.3f) du  V(%.3f, %.3f, %.3f) du/s  |V| %.3f du/s  |A| %.5f du/s2  %s",
+                    names[i], mass.get(i), simulationMassUnitsToSolarMasses(mass.get(i)),
+                    posX.get(i), posY.get(i), posZ.get(i),
                     velX.get(i), velY.get(i), velZ.get(i), speed, accel, nearest));
             label.setWrapText(true);
             label.setStyle("-fx-text-fill: " + toHex(colors[i]) + "; -fx-font-family: monospace; -fx-font-size: 11px;");
@@ -1311,6 +1452,14 @@ public class BodySimulator extends Application {
                 dashboard.getChildren().add(radius);
             }
         }
+    }
+
+    static double simulationMassUnitsToSolarMasses(double simulationMassUnits) {
+        return simulationMassUnits * KILOGRAMS_PER_MASS_UNIT / SI_SOLAR_MASS_KILOGRAMS;
+    }
+
+    static double solarMassesToSimulationMassUnits(double solarMasses) {
+        return solarMasses * SI_SOLAR_MASS_KILOGRAMS / KILOGRAMS_PER_MASS_UNIT;
     }
 
     private String nearestBodyText(int bodyIndex) {
@@ -1374,7 +1523,7 @@ public class BodySimulator extends Application {
         clearTrails();
         clearFullTracks();
         clearPhotonPath();
-        planDirty = true;
+        invalidateExecutionPlan();
         draw();
         updateDashboard();
     }
@@ -1409,15 +1558,52 @@ public class BodySimulator extends Application {
         gc.strokeLine(fromScreen[0], fromScreen[1], toScreen[0], toScreen[1]);
     }
 
-    private void strokeProjectedGridLine(GraphicsContext gc, Point3 from, Point3 to) {
-        double[] fromScreen = projectPoint(from.x, from.y, from.z);
-        double[] toScreen = projectPoint(to.x, to.y, to.z);
-        double segmentLength = Math.hypot(toScreen[0] - fromScreen[0], toScreen[1] - fromScreen[1]);
-        double sampleLength = GRID_STEP * 0.35 * viewScale;
+    void strokeProjectedGridLine(GraphicsContext gc,
+                                 double fromX, double fromY, double fromZ,
+                                 double toX, double toY, double toZ, double sampleStep) {
+        strokeProjectedGridLine(gc, fromX, fromY, fromZ, toX, toY, toZ, sampleStep, gridProjection());
+    }
+
+    private void strokeProjectedGridLine(GraphicsContext gc,
+                                         double fromX, double fromY, double fromZ,
+                                         double toX, double toY, double toZ, double sampleStep,
+                                         GridProjection projection) {
+        double cosYaw = projection.cosYaw;
+        double sinYaw = projection.sinYaw;
+        double cosPitch = projection.cosPitch;
+        double sinPitch = projection.sinPitch;
+        double cosRoll = projection.cosRoll;
+        double sinRoll = projection.sinRoll;
+
+        double fromYawX = fromX * cosYaw + fromZ * sinYaw;
+        double fromYawZ = -fromX * sinYaw + fromZ * cosYaw;
+        double fromPitchedY = fromY * cosPitch - fromYawZ * sinPitch;
+        double fromRolledX = fromYawX * cosRoll - fromPitchedY * sinRoll;
+        double fromRolledY = fromYawX * sinRoll + fromPitchedY * cosRoll;
+        double fromScreenX = canvas.getWidth() * 0.5 + fromRolledX * viewScale;
+        double fromScreenY = canvas.getHeight() * 0.5 - fromRolledY * viewScale;
+
+        double toYawX = toX * cosYaw + toZ * sinYaw;
+        double toYawZ = -toX * sinYaw + toZ * cosYaw;
+        double toPitchedY = toY * cosPitch - toYawZ * sinPitch;
+        double toRolledX = toYawX * cosRoll - toPitchedY * sinRoll;
+        double toRolledY = toYawX * sinRoll + toPitchedY * cosRoll;
+        double toScreenX = canvas.getWidth() * 0.5 + toRolledX * viewScale;
+        double toScreenY = canvas.getHeight() * 0.5 - toRolledY * viewScale;
+
+        double segmentLength = Math.hypot(toScreenX - fromScreenX, toScreenY - fromScreenY);
+        double sampleLength = sampleStep * viewScale;
         double maximumLength = Math.max(GRID_SEGMENT_MIN_LIMIT_PIXELS, sampleLength * GRID_SEGMENT_MAX_LENGTH_FACTOR);
         if (Double.isFinite(segmentLength) && segmentLength <= maximumLength) {
-            gc.strokeLine(fromScreen[0], fromScreen[1], toScreen[0], toScreen[1]);
+            gc.strokeLine(fromScreenX, fromScreenY, toScreenX, toScreenY);
         }
+    }
+
+    private GridProjection gridProjection() {
+        return new GridProjection(
+                Math.cos(cameraYaw), Math.sin(cameraYaw),
+                Math.cos(cameraPitch), Math.sin(cameraPitch),
+                Math.cos(cameraRoll), Math.sin(cameraRoll));
     }
 
     private double[] projectPoint(double x, double y, double z) {
@@ -1472,7 +1658,7 @@ public class BodySimulator extends Application {
     }
 
     private void drawRotationAxis(GraphicsContext gc, double centerX, double centerY, double length,
-            double[] axis, Color color, String label) {
+                                  double[] axis, Color color, String label) {
         double endX = centerX + axis[0] * length;
         double endY = centerY - axis[1] * length;
         gc.setStroke(color);
@@ -1509,6 +1695,11 @@ public class BodySimulator extends Application {
 
     private String toHex(Color c) {
         return String.format("#%02X%02X%02X", (int) (c.getRed() * 255), (int) (c.getGreen() * 255), (int) (c.getBlue() * 255));
+    }
+
+    @Override
+    public void stop() {
+        closeExecutionPlan();
     }
 
     static void main(String[] args) {
