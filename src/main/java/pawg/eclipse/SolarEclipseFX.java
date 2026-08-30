@@ -168,8 +168,12 @@ public class SolarEclipseFX extends Application {
     }
 
     public static void main(String[] args) {
-        ECLIPSE_DURATION_SECONDS = Optional.ofNullable(args[1]).map(Double::parseDouble).orElse(ECLIPSE_DURATION_SECONDS);
-        MAX_COVERAGE_PERCENT = Optional.ofNullable(args[2]).map(Double::parseDouble).orElse(MAX_COVERAGE_PERCENT);
+        if (args != null && args.length > 1) {
+            ECLIPSE_DURATION_SECONDS = Optional.ofNullable(args[1]).map(Double::parseDouble).orElse(ECLIPSE_DURATION_SECONDS);
+        }
+        if (args != null && args.length > 2) {
+            MAX_COVERAGE_PERCENT = Optional.ofNullable(args[2]).map(Double::parseDouble).orElse(MAX_COVERAGE_PERCENT);
+        }
         launch(args);
     }
 }

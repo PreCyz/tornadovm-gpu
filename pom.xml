@@ -31,6 +31,11 @@
             <artifactId>controlsfx</artifactId>
             <version>11.2.4</version>
         </dependency>
+        <dependency>
+            <groupId>org.kordamp.bootstrapfx</groupId>
+            <artifactId>bootstrapfx-core</artifactId>
+            <version>0.4.0</version>
+        </dependency>
 
         <dependency>
             <groupId>io.github.beehive-lab</groupId>
@@ -67,13 +72,24 @@
                     <execution>
                         <!-- Default configuration for running with: mvn clean javafx:run -->
                         <id>default-cli</id>
-                        <configuration>
+                        <!--<configuration>
                             <mainClass>pawg.Launcher</mainClass>
                             <options>
-                                <option>@${env.TORNADOVM_HOME}/bin/tornado-argfile</option>
+                                <option>@${env.TORNADOVM_HOME}/tornado-argfile</option>
+                                <option>&#45;&#45;add-exports=java.base/jdk.internal.misc=ALL-UNNAMED</option>
+                                <option>&#45;&#45;add-exports=java.base/jdk.internal.ref=ALL-UNNAMED</option>
+                                <option>-Dtornado.enable.profiling=True</option>
+                            </options>
+                        </configuration>-->
+                        <configuration>
+                            <mainClass>pawg.Launcher</mainClass>
+                            <runtimePathOption>CLASSPATH</runtimePathOption>
+                            <options>
+                                <option>@${env.TORNADOVM_HOME}/tornado-argfile</option>
                                 <option>--add-exports=java.base/jdk.internal.misc=ALL-UNNAMED</option>
                                 <option>--add-exports=java.base/jdk.internal.ref=ALL-UNNAMED</option>
                                 <option>-Dtornado.enable.profiling=True</option>
+                                <option>--enable-native-access=ALL-UNNAMED</option>
                             </options>
                         </configuration>
                     </execution>

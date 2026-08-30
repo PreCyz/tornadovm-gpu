@@ -3,13 +3,7 @@ package pawg.nbody;
 import javafx.geometry.Insets;
 import javafx.geometry.Side;
 import javafx.scene.Node;
-import javafx.scene.control.Button;
-import javafx.scene.control.ButtonBar;
-import javafx.scene.control.ButtonType;
-import javafx.scene.control.Dialog;
-import javafx.scene.control.Alert;
-import javafx.scene.control.Label;
-import javafx.scene.control.TextArea;
+import javafx.scene.control.*;
 import javafx.scene.layout.Priority;
 import javafx.scene.layout.VBox;
 import javafx.stage.Stage;
@@ -18,15 +12,27 @@ import org.controlsfx.control.SearchableComboBox;
 import uk.ac.manchester.tornado.api.TornadoExecutionPlan;
 import uk.ac.manchester.tornado.api.common.TornadoDevice;
 
-import java.util.Arrays;
-import java.util.List;
+import java.util.*;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 public final class TornadoDeviceSelector {
     private static final String AUTO_DEFAULT_DEVICE_PROPERTY = "tornado.device.selector.default";
+    /**
+     * A launcher-provided TornadoVM device identifier in the strict {@code driver:device} form.
+     */
+    public static final String INHERITED_DEVICE_PROPERTY = "tornado.device.selector.inherited";
+    private static final Pattern DEVICE_ID_PATTERN = Pattern.compile("^(0|[1-9]\\d*):(0|[1-9]\\d*)$");
 
     public static TornadoDevice selectDevice(Stage owner) {
+        List<TornadoDeviceChoice> devices = deviceChoices();
+        Optional<TornadoDeviceChoice> inheritedChoice = inheritedDeviceChoice(devices);
+        if (hasInheritedDeviceProperty()) {
+            TornadoDeviceChoice choice = inheritedChoice.orElseGet(() -> defaultChoice(devices));
+            return resolveDevice(owner, choice, false);
+        }
         TornadoDeviceChoice choice = Boolean.getBoolean(AUTO_DEFAULT_DEVICE_PROPERTY)
-                ? defaultDeviceChoice()
+                ? initialDeviceChoice(devices)
                 : new TornadoDeviceSelector().showAndWait(owner);
         return resolveDevice(owner, choice);
     }
@@ -43,6 +49,10 @@ public final class TornadoDeviceSelector {
     }
 
     public static TornadoDeviceChoice initialDeviceChoice(List<TornadoDeviceChoice> devices) {
+        Optional<TornadoDeviceChoice> inheritedChoice = inheritedDeviceChoice(devices);
+        if (inheritedChoice.isPresent()) {
+            return inheritedChoice.get();
+        }
         if (devices == null || devices.isEmpty()) {
             return defaultDeviceChoice();
         }
@@ -53,12 +63,52 @@ public final class TornadoDeviceSelector {
     }
 
     public static TornadoDevice resolveDevice(Stage owner, TornadoDeviceChoice choice) {
+        return resolveDevice(owner, choice, true);
+    }
+
+    /**
+     * Encodes a device choice for {@value #INHERITED_DEVICE_PROPERTY}.
+     */
+    public static String encodeDeviceChoice(TornadoDeviceChoice choice) {
+        if (choice == null || choice.driverIndex() < 0 || choice.deviceIndex() < 0) {
+            throw new IllegalArgumentException("A device choice must have nonnegative driver and device indices");
+        }
+        return choice.driverIndex() + ":" + choice.deviceIndex();
+    }
+
+    /**
+     * Returns the launcher-provided device only when the property is strictly formatted and
+     * identifies one of the supplied detected choices.
+     */
+    public static Optional<TornadoDeviceChoice> inheritedDeviceChoice(List<TornadoDeviceChoice> devices) {
+        Optional<DeviceIndices> inheritedIndices = parseInheritedDeviceIndices();
+        if (inheritedIndices.isEmpty() || devices == null) {
+            return Optional.empty();
+        }
+        DeviceIndices indices = inheritedIndices.get();
+        return devices.stream()
+                .filter(choice -> choice.driverIndex() == indices.driverIndex()
+                        && choice.deviceIndex() == indices.deviceIndex())
+                .findFirst();
+    }
+
+    public static boolean hasInheritedDeviceProperty() {
+        return System.getProperty(INHERITED_DEVICE_PROPERTY) != null;
+    }
+
+    private static TornadoDevice resolveDevice(Stage owner, TornadoDeviceChoice choice, boolean showFailureAlert) {
         if (choice == null) {
             return null;
         }
         try {
             return TornadoExecutionPlan.getDevice(choice.driverIndex(), choice.deviceIndex());
         } catch (RuntimeException e) {
+            String message = "Could not select Tornado device " + choice.tornadoDeviceId()
+                    + "; the simulation will use TornadoVM's default device. " + e.getMessage();
+            if (!showFailureAlert) {
+                System.err.println(message);
+                return null;
+            }
             Alert alert = new Alert(Alert.AlertType.WARNING);
             alert.setTitle("TornadoVM Device");
             alert.setHeaderText("Could not select Tornado device " + choice.tornadoDeviceId());
@@ -68,6 +118,24 @@ public final class TornadoDeviceSelector {
             }
             alert.showAndWait();
             return null;
+        }
+    }
+
+    private static Optional<DeviceIndices> parseInheritedDeviceIndices() {
+        String encodedChoice = System.getProperty(INHERITED_DEVICE_PROPERTY);
+        if (encodedChoice == null) {
+            return Optional.empty();
+        }
+        Matcher matcher = DEVICE_ID_PATTERN.matcher(encodedChoice);
+        if (!matcher.matches()) {
+            return Optional.empty();
+        }
+        try {
+            return Optional.of(new DeviceIndices(
+                    Integer.parseInt(matcher.group(1)),
+                    Integer.parseInt(matcher.group(2))));
+        } catch (NumberFormatException ignored) {
+            return Optional.empty();
         }
     }
 
@@ -130,7 +198,13 @@ public final class TornadoDeviceSelector {
     }
 
     private static TornadoDeviceChoice defaultDeviceChoice() {
-        List<TornadoDeviceChoice> devices = TornadoDeviceCommand.detectDevices();
+        return defaultChoice(TornadoDeviceCommand.detectDevices());
+    }
+
+    private static TornadoDeviceChoice defaultChoice(List<TornadoDeviceChoice> devices) {
+        if (devices == null || devices.isEmpty()) {
+            return null;
+        }
         return devices.stream()
                 .filter(TornadoDeviceChoice::defaultDevice)
                 .findFirst()
@@ -190,5 +264,8 @@ public final class TornadoDeviceSelector {
             unitIndex++;
         }
         return String.format("%.1f %s", value, units[unitIndex]);
+    }
+
+    private record DeviceIndices(int driverIndex, int deviceIndex) {
     }
 }

@@ -12,7 +12,7 @@ import pawg.nbody.GravityGPU;
 import pawg.nbody.GravitySystemCPU;
 
 public class Launcher {
-    static void main(String[] args) {
+    public static void main(String[] args) {
         if (args.length > 0) {
             switch (args[0]) {
                 case "1" -> Application.launch(HeatDistributionFX.class, args);
@@ -26,7 +26,20 @@ public class Launcher {
                 default -> Application.launch(GameOfLifeInteractive.class, args);
             }
         } else {
-            Application.launch(GameOfLifeInteractive.class, args);
+            Application.launch(noArgumentApplication(bootstrapFxAvailable()));
+        }
+    }
+
+    static Class<? extends Application> noArgumentApplication(boolean bootstrapAvailable) {
+        return bootstrapAvailable ? LauncherWindow.class : GameOfLifeInteractive.class;
+    }
+
+    static boolean bootstrapFxAvailable() {
+        try {
+            Class.forName("org.kordamp.bootstrapfx.BootstrapFX", false, Launcher.class.getClassLoader());
+            return true;
+        } catch (ClassNotFoundException | LinkageError unavailable) {
+            return false;
         }
     }
 }

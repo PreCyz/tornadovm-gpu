@@ -10,11 +10,14 @@ The important design boundary is:
 
 ## Available demos
 
-`pawg.Launcher` selects a demo from the first command-line argument.
+`pawg.Launcher` still accepts direct numeric arguments for the legacy one-shot
+simulation launch path. With no arguments, the Maven launcher and packaged JAR
+open a BootstrapFX-based simulation chooser instead.
 
 | Argument | Demo | What it shows | Main compute path |
 | --- | --- | --- | --- |
-| none or `0` | Game of Life | Interactive 1200 x 880 toroidal cellular automaton | TornadoVM grid kernel |
+| none | Launcher window | BootstrapFX chooser with device selection and nine simulation buttons | Starts one isolated child JVM per choice |
+| `0` or unknown | Game of Life | Interactive 1200 x 880 toroidal cellular automaton | TornadoVM grid kernel |
 | `1` | Temporary heat sources | 2D finite-difference heat diffusion; drag to inject heat | TornadoVM grid kernel |
 | `2` | Permanent heaters | Heat diffusion with mouse-created fixed-temperature sources | TornadoVM grid kernel |
 | `3 [seconds] [coverage]` | Solar eclipse | Animated Sun, Moon, corona, and sky rendering | TornadoVM per-pixel kernel |
@@ -23,6 +26,10 @@ The important design boundary is:
 | `6` | CPU gravity | Interactive n-body simulation with trails and body creation | CPU pairwise forces and Verlet integration |
 | `7` | GPU gravity | Interactive n-body simulation, dashboard, editable bodies, and camera rotation | TornadoVM force, integration, and projection kernels |
 | `8` | GPU body simulator | Editable/removable bodies, hover help, circular-orbit reference guides, photons, black-hole capture, trails, camera pan/rotation, and a curved gravity grid | TornadoVM integration with JavaFX visualization |
+
+The launcher window uses BootstrapFX styling, follows the system light/dark
+preference, and passes the chosen device into GPU child JVMs. CPU targets do
+not receive a device selector property.
 
 The heat equation uses the five-point stencil:
 
@@ -118,20 +125,20 @@ Avoid adding `clean` to every development command: a running JavaFX process or I
 
 ### Maven JavaFX launcher
 
-Run the default Game of Life demo:
+Run the BootstrapFX launcher window:
 
 ```powershell
 mvnd javafx:run
 ```
 
-Pass the launcher argument through `javafx.args` to select another demo:
+Pass a numeric launcher argument through `javafx.args` to launch a specific demo directly:
 
 ```powershell
 mvnd javafx:run '-Djavafx.args=8'
 mvnd javafx:run '-Djavafx.args=3 12 100'
 ```
 
-The second eclipse argument is its duration in seconds; the third is maximum coverage as a percentage.
+The second eclipse argument is its duration in seconds; the third is maximum coverage as a percentage. Unknown numeric values still fall back to Game of Life.
 
 ### Repository PowerShell launcher
 
@@ -149,6 +156,10 @@ If local script execution is blocked, allow only this invocation:
 ```powershell
 pwsh -ExecutionPolicy Bypass -File .\run.ps1 8
 ```
+
+The script's classpath does not include BootstrapFX, so running it with no
+arguments still opens the legacy Game of Life path. Numeric arguments continue
+to launch the direct simulations.
 
 ## TornadoVM device selection
 
@@ -186,7 +197,7 @@ tornado --jvm="$jvmFlags" --cp $artifact pawg.Launcher 8
 
 Remove `-Dtornado.device.selector.default=true` to choose the accelerator interactively. Change the last argument using the demo table above.
 
-Although the shaded JAR has `pawg.Launcher` in its manifest, the supported command is the TornadoVM launcher shown above rather than plain `java -jar`: TornadoVM supplies required JVM/module/runtime settings. The shaded JAR includes the project's Java dependencies and Windows JavaFX native libraries, but it does **not** replace the matching JDK, TornadoVM installation, or accelerator driver on the destination machine. `original-tornadovm-gpu-1.0-SNAPSHOT.jar` is the unshaded intermediate JAR and is not the distributable artifact.
+Running the shaded JAR with no arguments opens the same BootstrapFX launcher window as `mvnd javafx:run`; numeric arguments keep the direct simulation path. Although the shaded JAR has `pawg.Launcher` in its manifest, the supported command is the TornadoVM launcher shown above rather than plain `java -jar`: TornadoVM supplies required JVM/module/runtime settings. The shaded JAR includes the project's Java dependencies and Windows JavaFX native libraries, but it does **not** replace the matching JDK, TornadoVM installation, or accelerator driver on the destination machine. `original-tornadovm-gpu-1.0-SNAPSHOT.jar` is the unshaded intermediate JAR and is not the distributable artifact.
 
 ## Project structure
 
