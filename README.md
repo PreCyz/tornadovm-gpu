@@ -88,7 +88,10 @@ unaffected by live body insertion or collision merges.
 - TornadoVM 5.2.0 built for JDK 25 with an available OpenCL backend/device
 - PowerShell 7 (`pwsh`) when using `run.ps1`
 
-JavaFX 25.0.2, ControlsFX 11.2.4, TornadoVM 5.2.0-jdk25, and JUnit 6.1.3 are resolved by Maven.
+JavaFX 25.0.2, ControlsFX 11.2.4, BootstrapFX 0.4.0, the TornadoVM
+5.2.0-jdk25 API, and JUnit 6.1.3 are resolved by Maven. The full TornadoVM
+runtime, Graal modules, native libraries, and device backend still come from
+the external `TORNADOVM_HOME` installation.
 
 Set the environment before building. Replace the example paths with your installation paths:
 
@@ -101,7 +104,10 @@ java --version
 tornado --devices
 ```
 
-The Maven JavaFX configuration reads `TORNADOVM_HOME/bin/tornado-argfile`; a missing or incorrect variable causes the application launch to fail before a demo starts.
+The Maven JavaFX configuration reads `TORNADOVM_HOME/tornado-argfile`; a
+missing file or incorrect variable causes the application launch to fail before
+a demo starts. The generated file must retain valid Windows drive letters such
+as `C:\`; see Troubleshooting if its module paths contain `C;\` instead.
 
 ## Build and test
 
@@ -130,6 +136,13 @@ Run the BootstrapFX launcher window:
 ```powershell
 mvnd javafx:run
 ```
+
+The chooser itself and device discovery start through Maven. The current child
+JVM argument filter does not retain every expanded TornadoVM/Graal option,
+however, so a selected simulation can fail with
+`NoClassDefFoundError: SnippetReflectionProvider`. Until that launcher defect is
+fixed, use the direct numeric form below; it starts the selected simulation in
+the Maven JVM and avoids the child-process filter.
 
 Pass a numeric launcher argument through `javafx.args` to launch a specific demo directly:
 
@@ -197,7 +210,17 @@ tornado --jvm="$jvmFlags" --cp $artifact pawg.Launcher 8
 
 Remove `-Dtornado.device.selector.default=true` to choose the accelerator interactively. Change the last argument using the demo table above.
 
-Running the shaded JAR with no arguments opens the same BootstrapFX launcher window as `mvnd javafx:run`; numeric arguments keep the direct simulation path. Although the shaded JAR has `pawg.Launcher` in its manifest, the supported command is the TornadoVM launcher shown above rather than plain `java -jar`: TornadoVM supplies required JVM/module/runtime settings. The shaded JAR includes the project's Java dependencies and Windows JavaFX native libraries, but it does **not** replace the matching JDK, TornadoVM installation, or accelerator driver on the destination machine. `original-tornadovm-gpu-1.0-SNAPSHOT.jar` is the unshaded intermediate JAR and is not the distributable artifact.
+Running the shaded JAR with no arguments opens the same BootstrapFX launcher
+window as `mvnd javafx:run`, including the current child-JVM argument-filtering
+limitation described above. Numeric arguments keep the direct simulation path
+and are the reliable packaged-launch form. Although the shaded JAR has
+`pawg.Launcher` in its manifest, the supported command is the TornadoVM launcher
+shown above rather than plain `java -jar`: TornadoVM supplies required
+JVM/module/runtime settings. The shaded JAR includes the project's Java
+dependencies and Windows JavaFX native libraries, but it does **not** replace
+the matching JDK, TornadoVM installation, or accelerator driver on the
+destination machine. `original-tornadovm-gpu-1.0-SNAPSHOT.jar` is the unshaded
+intermediate JAR and is not the distributable artifact.
 
 ## Project structure
 
@@ -258,8 +281,24 @@ When custom bodies or collision experiments require fresher CPU-side state, redu
 
 ## Troubleshooting
 
-- **`tornado-argfile` is missing:** verify `$env:TORNADOVM_HOME` and confirm `Test-Path "$env:TORNADOVM_HOME\bin\tornado-argfile"`.
+- **`tornado-argfile` is missing:** verify `$env:TORNADOVM_HOME` and confirm
+  `Test-Path "$env:TORNADOVM_HOME\tornado-argfile"`. The Maven launcher reads
+  this root-level generated file directly.
+- **`Module tornado.runtime not found`:** inspect the generated paths with
+  `Select-String -Path "$env:TORNADOVM_HOME\tornado-argfile" -Pattern '^--module-path|^--upgrade-module-path'`.
+  On TornadoVM 5.2.0 for Windows, the generator can incorrectly turn `C:\`
+  into `C;\` by replacing every colon in those lines. Correct the generator so
+  it converts only the separator in `--module-path .:` to `.;`, then regenerate
+  the argfile through the corrected `tornado.py`.
+- **`SnippetReflectionProvider` is missing after choosing a simulation:** the
+  initial Maven launcher is working, but `ChildJvmLauncher` currently drops the
+  expanded Graal `--upgrade-module-path` and some JVMCI options. Launch the demo
+  directly, for example `mvnd javafx:run '-Djavafx.args=8'`, until the child-JVM
+  propagation is corrected.
 - **No accelerator appears:** run `tornado --devices` and verify the OpenCL/CUDA driver and the TornadoVM backend installation.
 - **`run.ps1` cannot find JavaFX classes:** run `mvnd package` first and update the script's hard-coded Maven-repository paths.
+- **A child simulation ignores optional JVM flags:** debugger agents and
+  unsupported `-javaagent` entries are intentionally filtered. GPU children
+  receive one validated `driver:device` selector; CPU children receive none.
 - **A clean build cannot delete `target`:** close the running application and any process holding the JAR/classes, then retry.
 - **GPU output differs slightly from CPU output:** compare with an explicit numerical tolerance; floating-point reduction order can differ. Large, unstable, or non-finite differences are failures, not expected GPU noise.
