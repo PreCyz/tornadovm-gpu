@@ -332,11 +332,12 @@ class BodyPhysicsKernelsTest {
             nextAz = new FloatArray(size);
             mass = new FloatArray(size);
             active = new IntArray(size);
-            params = new FloatArray(3);
+            params = new FloatArray(4);
             count = new IntArray(1);
             params.set(0, gravity);
             params.set(1, dt);
             params.set(2, softening);
+            params.set(3, 0.5f);
             count.set(0, size);
         }
 

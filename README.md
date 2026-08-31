@@ -44,14 +44,20 @@ The gravity demos initialize circular orbits from Kepler-style velocities and co
 Demo `8` is an interactive JavaFX view over the `pawg.body` n-body state. The
 GPU task graph performs the regular acceleration and Velocity-Verlet update;
 the JavaFX Application Thread owns body editing, collision orchestration,
-device-plan lifecycle, dashboard refreshes, camera input, and drawing. Position
-and velocity are transferred back after each executed simulation step so the
-dashboard and canvas show the synchronized host snapshot.
+device-plan lifecycle, dashboard refreshes, camera input, and drawing. GPU
+execution runs on a background worker; JavaFX renders interpolated snapshots
+from the most recent device readbacks instead of blocking the pulse on each
+TornadoVM execution. When the simulator is stopped, adding, editing, or
+resetting bodies prepares the TornadoVM execution plan before the next run so
+**Start** can hand off stepping to the worker without invalidating the plan
+first.
 
 - Use **+** to add an editable body. Editing while stopped still works as
   before; adding a body while running keeps the simulation running, fully
-  initializes the new body, and the next device execution picks it up through
-  the mutable-state upload without a plan rebuild or restart.
+  initializes the new body, and marks the device-resident simulation state for
+  rebuild so the next worker step imports the edited host state. When stopped,
+  add and edit actions also prepare the plan so the next **Start** can run
+  without invalidating it first.
 - Drag a body to reposition it. Drag empty canvas space to yaw/pitch; hold
   Shift or use the right mouse button on empty space to roll. Dragging a body
   pauses the elapsed clock until the drag ends. Scroll zooms.
@@ -72,13 +78,17 @@ dashboard and canvas show the synchronized host snapshot.
   candidate-body mass, or third-body perturbations. It can therefore draw a
   circle that a body will not follow; treat it as a visual reference, not an
   orbit prediction. The curved gravity grid uses the physical `SOFTENING`
-  constant rather than zoom level, and collision merges invalidate the grid
-  geometry so the next draw reflects the new mass distribution.
+  constant rather than zoom level, is cached between redraws, and collision
+  merges invalidate the grid geometry so the next draw reflects the new mass
+  distribution. The cached snapshot uses a transparent fill so the grid
+  composites cleanly over the scene.
 
 The elapsed label beside **Body Simulator** shows `Elapsed HH:MM:SS`. It starts
 or resumes on **Start** or after a successful **Photon** shot, resets and stops
 on **Reset** or a device reset, pauses while a body is being dragged, and is
-unaffected by live body insertion or collision merges.
+unaffected by live body insertion or collision merges. `Start` now reuses a
+prepared GPU plan and starts a background worker instead of forcing a fresh plan
+invalidation and device execution on the first JavaFX frame.
 
 ## Requirements
 
@@ -278,6 +288,44 @@ pwsh -File .\run.ps1 7
 ```
 
 When custom bodies or collision experiments require fresher CPU-side state, reduce `gravitygpu.state.readback.interval`. When orbit guides are visible, the application intentionally synchronizes position and velocity at the render cadence so guides reflect perturbations.
+
+## BodySimulator tuning and profiling
+
+`BodySimulator` exposes JVM system properties for controlling the background GPU worker, render-snapshot readback cadence, and timing logs:
+
+| Property | Default | Purpose |
+| --- | ---: | --- |
+| `pawg.body.render.readback.interval` | `2` | Publishes a host render snapshot every N worker steps; higher values reduce readback stalls but increase interpolation distance |
+| `pawg.body.dashboard.update.frames` | `5` | Minimum JavaFX frames between dashboard rebuilds while running |
+| `pawg.body.step.interval.ms` | `15.0` | Target background simulation-worker step interval |
+| `pawg.body.gpu.warmup` | `true` | Starts a stopped-state GPU warm-up after bodies are added so first Start avoids TornadoVM first-execution work |
+| `pawg.body.gpu.warmup.delay.ms` | `750.0` | Debounces stopped-state warm-up while the user is still adding/editing bodies |
+| `pawg.body.timing` | `false` | Enables JavaFX-frame and worker timing printouts |
+| `pawg.body.timing.slow.ms` | `24.0` | Slow JavaFX-frame logging threshold |
+| `pawg.body.timing.summary.frames` | `300` | Timing-summary interval for UI frames and worker steps |
+
+Example profiling run:
+
+```powershell
+$env:EXTRA_JVM_FLAGS = '-Dtornado.device.selector.default=true -Dpawg.body.timing=true -Dpawg.body.timing.slow.ms=16 -Dpawg.body.timing.summary.frames=300 -Dpawg.body.render.readback.interval=2 -Dpawg.body.dashboard.update.frames=5 -Dpawg.body.step.interval.ms=15 -Dpawg.body.gpu.warmup=true -Dpawg.body.gpu.warmup.delay.ms=750'
+pwsh -File .\run.ps1 8
+```
+
+Running GPU collisions switch to a CPU bridge after a merge so the merged bodies
+continue moving instead of waiting for TornadoVM device-state recovery. With
+`pawg.body.timing=true`, the collision line reports this as `cpuBridge=true` and
+`asyncGpuWarmup=false`. The gated profiling test `BodySimulatorProfilingTest`
+only runs when `-Dbodyprofile.run=true` is set; add `-Dbodygpu.test.gpu=true` to
+exercise the real TornadoVM device path.
+Live collision editor rows are synchronized with a lightweight row update while
+the simulator is running, so absorbed bodies disappear and the merged body row
+updates without a full editor rebuild on the collision pulse.
+
+Useful first measurements are the `BodySimulator warmup summary`,
+`BodySimulator collision summary`, `BodySimulator UI summary` draw buckets, and
+`BodySimulator worker summary` rebuild/execute/readback timings. Compare runs by changing one
+property at a time; start with `pawg.body.render.readback.interval=1`, `2`, and `3` to see whether
+device readback or interpolation distance dominates smoothness.
 
 ## Troubleshooting
 

@@ -2,14 +2,18 @@ package pawg.body;
 
 import javafx.animation.*;
 import javafx.application.Application;
+import javafx.application.Platform;
 import javafx.beans.binding.DoubleBinding;
 import javafx.beans.property.DoubleProperty;
 import javafx.beans.property.SimpleDoubleProperty;
 import javafx.geometry.*;
+import javafx.scene.Node;
 import javafx.scene.Scene;
+import javafx.scene.SnapshotParameters;
 import javafx.scene.canvas.Canvas;
 import javafx.scene.canvas.GraphicsContext;
 import javafx.scene.control.*;
+import javafx.scene.image.WritableImage;
 import javafx.scene.input.*;
 import javafx.scene.layout.*;
 import javafx.scene.paint.*;
@@ -24,12 +28,16 @@ import pawg.nbody.TornadoDeviceChoice;
 import pawg.nbody.TornadoDeviceSelector;
 import uk.ac.manchester.tornado.api.TaskGraph;
 import uk.ac.manchester.tornado.api.TornadoExecutionPlan;
+import uk.ac.manchester.tornado.api.TornadoExecutionResult;
 import uk.ac.manchester.tornado.api.common.TornadoDevice;
 import uk.ac.manchester.tornado.api.enums.DataTransferMode;
 import uk.ac.manchester.tornado.api.types.arrays.FloatArray;
 import uk.ac.manchester.tornado.api.types.arrays.IntArray;
 
 import java.util.*;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.locks.LockSupport;
+import java.util.concurrent.locks.ReentrantLock;
 
 public class BodySimulator extends Application {
 
@@ -92,6 +100,22 @@ public class BodySimulator extends Application {
     private static final double ROTATION_INDICATOR_BODY_RADIUS = 3.25;
     private static final int FULL_TRACK_RENDER_POINT_LIMIT = 2_000;
     private static final boolean CPU_PHYSICS = Boolean.getBoolean("pawg.body.cpu");
+    private static final int RENDER_READBACK_INTERVAL_FRAMES =
+            Math.max(1, Integer.getInteger("pawg.body.render.readback.interval", 2));
+    private static final int DASHBOARD_UPDATE_FRAMES =
+            Math.max(1, Integer.getInteger("pawg.body.dashboard.update.frames", 5));
+    private static final long SIMULATION_STEP_INTERVAL_NANOS =
+            Math.max(1L, (long) (Double.parseDouble(System.getProperty("pawg.body.step.interval.ms", "15.0")) * 1_000_000.0));
+    private static final boolean FRAME_TIMING_ENABLED = Boolean.getBoolean("pawg.body.timing");
+    private static final double FRAME_TIMING_SLOW_MS =
+            Double.parseDouble(System.getProperty("pawg.body.timing.slow.ms", "24.0"));
+    private static final int FRAME_TIMING_SUMMARY_FRAMES =
+            Math.max(1, Integer.getInteger("pawg.body.timing.summary.frames", 300));
+    private static final boolean GPU_WARMUP_ENABLED =
+            Boolean.parseBoolean(System.getProperty("pawg.body.gpu.warmup", "true"));
+    private static final long GPU_WARMUP_DEBOUNCE_NANOS =
+            Math.max(0L, (long) (Double.parseDouble(System.getProperty("pawg.body.gpu.warmup.delay.ms", "750.0"))
+                    * 1_000_000.0));
     private static final String GREEN_BUTTON_STYLE = "-fx-background-color: #1d2b24; -fx-text-fill: #00ff88; -fx-border-color: #00aa66; -fx-font-weight: bold; -fx-cursor: hand;";
     private static final String RED_BUTTON_STYLE = "-fx-background-color: #222; -fx-text-fill: #ff4444; -fx-border-color: #ff4444; -fx-font-weight: bold; -fx-cursor: hand;";
     private static final String BLUE_BUTTON_STYLE = "-fx-background-color: #1b2533; -fx-text-fill: #9ecfff; -fx-border-color: #497aa5; -fx-font-weight: bold; -fx-cursor: hand;";
@@ -110,7 +134,7 @@ public class BodySimulator extends Application {
     private final FloatArray nextAccZ = new FloatArray(MAX_BODIES);
     private final FloatArray mass = new FloatArray(MAX_BODIES);
     private final IntArray active = new IntArray(MAX_BODIES);
-    private final FloatArray params = new FloatArray(3);
+    private final FloatArray params = new FloatArray(4);
     private final IntArray state = new IntArray(1);
 
     private final float[] initialPosX = new float[MAX_BODIES];
@@ -124,6 +148,17 @@ public class BodySimulator extends Application {
     private final Color[] initialColors = new Color[MAX_BODIES];
     private final String[] names = new String[MAX_BODIES];
     private final Color[] colors = new Color[MAX_BODIES];
+    private final ReentrantLock simulationLock = new ReentrantLock();
+    private final AtomicBoolean simulationWorkerStopRequested = new AtomicBoolean();
+    private final float[] renderPosX = new float[MAX_BODIES];
+    private final float[] renderPosY = new float[MAX_BODIES];
+    private final float[] renderPosZ = new float[MAX_BODIES];
+    private final float[] renderVelX = new float[MAX_BODIES];
+    private final float[] renderVelY = new float[MAX_BODIES];
+    private final float[] renderVelZ = new float[MAX_BODIES];
+    private final float[] renderAccX = new float[MAX_BODIES];
+    private final float[] renderAccY = new float[MAX_BODIES];
+    private final float[] renderAccZ = new float[MAX_BODIES];
     private final TextField[] positionXFields = new TextField[MAX_BODIES];
     private final TextField[] positionYFields = new TextField[MAX_BODIES];
     private final TextField[] positionZFields = new TextField[MAX_BODIES];
@@ -161,6 +196,7 @@ public class BodySimulator extends Application {
     private Button dashboardRestoreButton;
     private Timeline dashboardDrawerTimeline;
     private AnimationTimer simulationTimer;
+    private PauseTransition gpuWarmupDebounceTimer;
     private Label elapsedTimeLabel;
     private boolean elapsedClockRunning;
     private long elapsedAccumulatedNanos;
@@ -168,11 +204,19 @@ public class BodySimulator extends Application {
     private long lastAnimationNow = -1L;
     private long displayedElapsedSecond = -1L;
     private TornadoExecutionPlan executionPlan;
+    private Thread simulationWorker;
+    private Thread warmupWorker;
+    private volatile RenderSnapshot previousRenderSnapshot;
+    private volatile RenderSnapshot currentRenderSnapshot;
+    private int renderBodyCount;
+    private int appliedSnapshotStep;
+    private int simulationStepCounter;
+    private int lastDashboardFrame = -DASHBOARD_UPDATE_FRAMES;
     private TornadoDevice selectedDevice;
     private TornadoDeviceChoice selectedDeviceChoice;
-    private int bodyCount;
+    private volatile int bodyCount;
     private int initialBodyCount;
-    private boolean running;
+    private volatile boolean running;
     private boolean planDirty = true;
     private boolean showTrails;
     private boolean showFullTracks;
@@ -216,6 +260,19 @@ public class BodySimulator extends Application {
     private double cachedGridCameraPitch = Double.NaN;
     private double cachedGridCameraRoll = Double.NaN;
     private double cachedGridSampleStep = GRID_STEP * 0.35;
+    private WritableImage cachedGridImage;
+    private boolean cachedGridImageDirty = true;
+    private double cachedGridImageWidth = Double.NaN;
+    private double cachedGridImageHeight = Double.NaN;
+    private volatile boolean gpuWarmupReady;
+    private volatile boolean gpuWarmupInProgress;
+    private volatile int warmupGeneration;
+    private volatile boolean stopped;
+    private boolean editorRebuildPending;
+    private boolean gridCacheRefreshPending;
+    private volatile boolean gpuPostMergeCpuBridgeActive;
+    private volatile boolean gpuPostMergeWarmupPending;
+    private volatile boolean gpuPostMergeWarmupInProgress;
 
     private record Point3(float x, float y, float z) {
     }
@@ -227,11 +284,62 @@ public class BodySimulator extends Application {
             double cosRoll, double sinRoll) {
     }
 
+    private record RenderSnapshot(
+            int step,
+            long capturedAtNanos,
+            int bodyCount,
+            float[] posX,
+            float[] posY,
+            float[] posZ,
+            float[] velX,
+            float[] velY,
+            float[] velZ,
+            float[] accX,
+            float[] accY,
+            float[] accZ) {
+    }
+
+    private record SimulationStepTiming(
+            long executeNanos,
+            long readbackNanos,
+            boolean publishedSnapshot) {
+    }
+
+    private record PlanRebuildTiming(boolean rebuilt, long rebuildNanos) {
+    }
+
+    private record GpuWarmupTiming(
+            boolean warmed,
+            long totalNanos,
+            long rebuildNanos,
+            long executeNanos,
+            int bodyCount) {
+    }
+
+    private record DrawTiming(
+            long gridNanos,
+            long gridRebuildNanos,
+            long gridSnapshotNanos,
+            long guidesNanos,
+            long trailsNanos,
+            long photonNanos,
+            long bodiesNanos,
+            long indicatorNanos) {
+
+        long totalNanos() {
+            return gridNanos + guidesNanos + trailsNanos + photonNanos + bodiesNanos + indicatorNanos;
+        }
+    }
+
+    private record GridCacheTiming(long rebuildNanos, long snapshotNanos) {
+    }
+
     @Override
     public void start(Stage stage) {
         params.set(0, G);
         params.set(1, DT);
         params.set(2, SOFTENING);
+        params.set(3, CENTER_COLLISION_EPSILON);
         for (int i = 0; i < MAX_BODIES; i++) {
             trails[i] = new ArrayDeque<>(TRAIL_CAPACITY);
             fullTracks[i] = new ArrayList<>();
@@ -343,13 +451,30 @@ public class BodySimulator extends Application {
 
         simulationTimer = new AnimationTimer() {
             private int frame;
+            private final FrameTiming frameTiming = new FrameTiming();
 
             @Override
             public void handle(long now) {
+                long frameStartNanos = System.nanoTime();
+                long stageStartNanos = frameStartNanos;
                 updateElapsedClock(now);
+                long elapsedNanos = System.nanoTime() - stageStartNanos;
+
+                boolean appliedSnapshot = false;
+                stageStartNanos = System.nanoTime();
                 if (running && bodyCount > 0) {
-                    stepSimulation();
-                    resolveBodyCollisions();
+                    if (CPU_PHYSICS) {
+                        stepSimulation();
+                        resolveBodyCollisions();
+                        copyCurrentStateToRenderState();
+                    } else if (gpuPostMergeCpuBridgeActive) {
+                        appliedSnapshot = stepPostMergeCpuBridge(System.nanoTime());
+                    } else {
+                        appliedSnapshot = updateInterpolatedRenderState(System.nanoTime());
+                        if (appliedSnapshot) {
+                            resolveBodyCollisionsFromSnapshot();
+                        }
+                    }
                     if (showTrails && frame % 2 == 0) {
                         appendTrails();
                     }
@@ -357,10 +482,27 @@ public class BodySimulator extends Application {
                         appendFullTracks();
                     }
                     frame++;
+                } else {
+                    copyCurrentStateToRenderState();
                 }
+                long simulationNanos = System.nanoTime() - stageStartNanos;
+
+                stageStartNanos = System.nanoTime();
                 advancePhotonAnimation();
-                draw();
-                updateDashboard();
+                long photonNanos = System.nanoTime() - stageStartNanos;
+
+                stageStartNanos = System.nanoTime();
+                DrawTiming drawTiming = draw();
+                long drawNanos = System.nanoTime() - stageStartNanos;
+                consumeDeferredGridRefresh();
+
+                stageStartNanos = System.nanoTime();
+                if (shouldUpdateDashboard(frame, appliedSnapshot)) {
+                    updateDashboard();
+                }
+                long dashboardNanos = System.nanoTime() - stageStartNanos;
+                frameTiming.record(frame, elapsedNanos, simulationNanos, photonNanos, drawNanos, dashboardNanos,
+                        drawTiming, appliedSnapshot, System.nanoTime() - frameStartNanos);
             }
         };
         simulationTimer.start();
@@ -388,7 +530,7 @@ public class BodySimulator extends Application {
             rotatingRoll = rotatingCamera && event.getButton() == MouseButton.SECONDARY;
             if (draggedBodyIndex >= 0) {
                 draggedBodyViewDepth = worldToView(
-                        posX.get(draggedBodyIndex), posY.get(draggedBodyIndex), posZ.get(draggedBodyIndex))[2];
+                        renderPosX[draggedBodyIndex], renderPosY[draggedBodyIndex], renderPosZ[draggedBodyIndex])[2];
             }
             dragStartX = event.getX();
             dragStartY = event.getY();
@@ -466,8 +608,8 @@ public class BodySimulator extends Application {
                 setStyle(isEmpty()
                         ? ""
                         : isHover()
-                                ? "-fx-background-color: #365f85;"
-                                : "-fx-background-color: #1b2533;");
+                        ? "-fx-background-color: #365f85;"
+                        : "-fx-background-color: #1b2533;");
             }
         };
     }
@@ -475,17 +617,30 @@ public class BodySimulator extends Application {
     private void changeDevice(Stage stage, TornadoDeviceChoice deviceChoice) {
         selectedDeviceChoice = deviceChoice;
         selectedDevice = TornadoDeviceSelector.resolveDevice(stage, deviceChoice);
-        invalidateExecutionPlan();
+        stopSimulationWorker();
+        simulationLock.lock();
+        try {
+            invalidateExecutionPlan();
+        } finally {
+            simulationLock.unlock();
+        }
         resetToInitialState();
     }
 
     private void startSimulation() {
         if (!running) {
             snapshotInitialState();
+            prepareStoppedExecutionPlan();
+        }
+        if (gpuWarmupDebounceTimer != null) {
+            gpuWarmupDebounceTimer.stop();
         }
         running = true;
         resumeElapsedClock();
-        invalidateExecutionPlan();
+        publishRenderSnapshot(System.nanoTime());
+        if (!CPU_PHYSICS && selectedDevice != null) {
+            startSimulationWorker();
+        }
         clearTrails();
         clearFullTracks();
         clearPhotonPath();
@@ -495,21 +650,34 @@ public class BodySimulator extends Application {
         if (bodyCount >= MAX_BODIES) {
             return;
         }
-        int i = bodyCount++;
-        names[i] = "Body " + bodyCount;
-        colors[i] = Color.hsb((i * 47.0) % 360.0, 0.80, 1.0);
-        setBody(i, (i % 6 - 2) * 2.0f, (i / 6f) * 2.0f, 0.0f, 0.0f, 0.65f + i * 0.03f, 0.0f, 10.0f);
-        accX.set(i, 0.0f);
-        accY.set(i, 0.0f);
-        accZ.set(i, 0.0f);
-        nextAccX.set(i, 0.0f);
-        nextAccY.set(i, 0.0f);
-        nextAccZ.set(i, 0.0f);
-        active.set(i, 1);
-        state.set(0, bodyCount);
-        trails[i].clear();
-        fullTracks[i].clear();
+        simulationLock.lock();
+        try {
+            int i = bodyCount++;
+            names[i] = "Body " + bodyCount;
+            colors[i] = Color.hsb((i * 47.0) % 360.0, 0.80, 1.0);
+            setBody(i, (i % 6 - 2) * 2.0f, (i / 6f) * 2.0f, 0.0f, 0.0f, 0.65f + i * 0.03f, 0.0f, 10.0f);
+            accX.set(i, 0.0f);
+            accY.set(i, 0.0f);
+            accZ.set(i, 0.0f);
+            nextAccX.set(i, 0.0f);
+            nextAccY.set(i, 0.0f);
+            nextAccZ.set(i, 0.0f);
+            active.set(i, 1);
+            state.set(0, bodyCount);
+            markWarmupDirty();
+            trails[i].clear();
+            fullTracks[i].clear();
+            if (running && !CPU_PHYSICS) {
+                invalidateExecutionPlan();
+            }
+        } finally {
+            simulationLock.unlock();
+        }
         snapshotInitialState();
+        if (!running) {
+            prepareStoppedExecutionPlan();
+        }
+        resetRenderSnapshots();
         rebuildEditors();
         invalidateGridGeometry();
         draw();
@@ -525,13 +693,21 @@ public class BodySimulator extends Application {
             return;
         }
         draggedBodyIndex = -1;
-        removeBodySlot(removedIndex);
-        state.set(0, bodyCount);
+        simulationLock.lock();
+        try {
+            removeBodySlot(removedIndex);
+            state.set(0, bodyCount);
+            markWarmupDirty();
+            invalidateExecutionPlan();
+        } finally {
+            simulationLock.unlock();
+        }
         snapshotInitialState();
         clearTrails();
         clearFullTracks();
         clearPhotonPath();
-        invalidateExecutionPlan();
+        prepareStoppedExecutionPlan();
+        resetRenderSnapshots();
         rebuildEditors();
         draw();
         updateDashboard();
@@ -548,22 +724,28 @@ public class BodySimulator extends Application {
     }
 
     private void snapshotInitialState() {
-        initialBodyCount = bodyCount;
-        for (int i = 0; i < MAX_BODIES; i++) {
-            initialPosX[i] = posX.get(i);
-            initialPosY[i] = posY.get(i);
-            initialPosZ[i] = posZ.get(i);
-            initialVelX[i] = velX.get(i);
-            initialVelY[i] = velY.get(i);
-            initialVelZ[i] = velZ.get(i);
-            initialMass[i] = mass.get(i);
-            initialNames[i] = names[i];
-            initialColors[i] = colors[i];
+        simulationLock.lock();
+        try {
+            initialBodyCount = bodyCount;
+            for (int i = 0; i < MAX_BODIES; i++) {
+                initialPosX[i] = posX.get(i);
+                initialPosY[i] = posY.get(i);
+                initialPosZ[i] = posZ.get(i);
+                initialVelX[i] = velX.get(i);
+                initialVelY[i] = velY.get(i);
+                initialVelZ[i] = velZ.get(i);
+                initialMass[i] = mass.get(i);
+                initialNames[i] = names[i];
+                initialColors[i] = colors[i];
+            }
+        } finally {
+            simulationLock.unlock();
         }
     }
 
     private void resetToInitialState() {
         running = false;
+        stopSimulationWorker();
         resetElapsedClock();
         draggedBodyIndex = -1;
         viewScale = INITIAL_VIEW_SCALE;
@@ -571,34 +753,46 @@ public class BodySimulator extends Application {
         cameraPitch = 0.0;
         cameraRoll = 0.0;
         recenterView();
-        bodyCount = initialBodyCount;
-        state.set(0, bodyCount);
-        for (int i = 0; i < MAX_BODIES; i++) {
-            posX.set(i, initialPosX[i]);
-            posY.set(i, initialPosY[i]);
-            posZ.set(i, initialPosZ[i]);
-            velX.set(i, initialVelX[i]);
-            velY.set(i, initialVelY[i]);
-            velZ.set(i, initialVelZ[i]);
-            mass.set(i, initialMass[i]);
-            names[i] = initialNames[i];
-            colors[i] = initialColors[i];
-            accX.set(i, 0.0f);
-            accY.set(i, 0.0f);
-            accZ.set(i, 0.0f);
-            active.set(i, i < bodyCount ? 1 : 0);
+        simulationLock.lock();
+        try {
+            bodyCount = initialBodyCount;
+            state.set(0, bodyCount);
+            for (int i = 0; i < MAX_BODIES; i++) {
+                posX.set(i, initialPosX[i]);
+                posY.set(i, initialPosY[i]);
+                posZ.set(i, initialPosZ[i]);
+                velX.set(i, initialVelX[i]);
+                velY.set(i, initialVelY[i]);
+                velZ.set(i, initialVelZ[i]);
+                mass.set(i, initialMass[i]);
+                names[i] = initialNames[i];
+                colors[i] = initialColors[i];
+                accX.set(i, 0.0f);
+                accY.set(i, 0.0f);
+                accZ.set(i, 0.0f);
+                nextAccX.set(i, 0.0f);
+                nextAccY.set(i, 0.0f);
+                nextAccZ.set(i, 0.0f);
+                active.set(i, i < bodyCount ? 1 : 0);
+            }
+            invalidateExecutionPlan();
+        } finally {
+            simulationLock.unlock();
         }
         clearTrails();
         clearFullTracks();
         clearPhotonPath();
-        invalidateExecutionPlan();
+        prepareStoppedExecutionPlan();
+        resetRenderSnapshots();
         rebuildEditors();
         draw();
         updateDashboard();
     }
 
     private void resolveBodyCollisions() {
+        long collisionStartNanos = System.nanoTime();
         boolean mergedAny = false;
+        int mergeCount = 0;
         boolean mergedThisPass;
         do {
             mergedThisPass = false;
@@ -618,6 +812,7 @@ public class BodySimulator extends Application {
                             <= CENTER_COLLISION_EPSILON * CENTER_COLLISION_EPSILON) {
                         mergeBodies(i, j);
                         mergedAny = true;
+                        mergeCount++;
                         mergedThisPass = true;
                         break collisionSearch;
                     }
@@ -626,13 +821,42 @@ public class BodySimulator extends Application {
         } while (mergedThisPass);
 
         if (mergedAny) {
+            long sideEffectsStartNanos = System.nanoTime();
             state.set(0, bodyCount);
-            invalidateGridGeometry();
+            deferGridGeometryRefresh();
             clearTrails();
             clearFullTracks();
             clearPhotonPath();
-            rebuildEditors();
+            boolean deferredPlan = requestDeviceStateUploadAfterHostMerge();
+            lastDashboardFrame = -DASHBOARD_UPDATE_FRAMES;
+            scheduleEditorRebuild();
+            if (FRAME_TIMING_ENABLED) {
+                System.out.printf(Locale.ROOT,
+                        "BodySimulator collision summary merges=%d total=%.3fms sideEffects=%.3fms bodyCount=%d "
+                                + "deferredGrid=%s deferredEditors=%s deferredPlan=%s cpuBridge=%s asyncGpuWarmup=%s%n",
+                        mergeCount,
+                        toMillis(System.nanoTime() - collisionStartNanos),
+                        toMillis(System.nanoTime() - sideEffectsStartNanos),
+                        bodyCount,
+                        gridCacheRefreshPending,
+                        editorRebuildPending,
+                        deferredPlan,
+                        gpuPostMergeCpuBridgeActive,
+                        gpuPostMergeWarmupPending || gpuPostMergeWarmupInProgress);
+            }
         }
+    }
+
+    private boolean requestDeviceStateUploadAfterHostMerge() {
+        if (running && !CPU_PHYSICS && executionPlan != null) {
+            gpuPostMergeCpuBridgeActive = true;
+            gpuPostMergeWarmupPending = false;
+            gpuPostMergeWarmupInProgress = false;
+            planDirty = true;
+            return true;
+        }
+        deferExecutionPlanRebuild();
+        return true;
     }
 
     private void mergeBodies(int survivor, int absorbed) {
@@ -721,6 +945,7 @@ public class BodySimulator extends Application {
             }
         } finally {
             suppressEditorApply = false;
+            editorRebuildPending = false;
         }
     }
 
@@ -754,7 +979,7 @@ public class BodySimulator extends Application {
             try {
                 setBody(i, parse(x), parse(y), parse(z), parse(vx), parse(vy), parse(vz), parse(m));
                 snapshotInitialState();
-                invalidateExecutionPlan();
+                prepareStoppedExecutionPlan();
                 clearTrails();
                 clearFullTracks();
                 clearPhotonPath();
@@ -1029,16 +1254,17 @@ public class BodySimulator extends Application {
         grid.add(field, column + 1, row);
     }
 
-    private void rebuildPlanIfNeeded() {
+    private PlanRebuildTiming rebuildPlanIfNeeded() {
         if (!planDirty && executionPlan != null) {
-            return;
+            return new PlanRebuildTiming(false, 0L);
         }
+        long rebuildStartNanos = System.nanoTime();
         closeExecutionPlan();
         TaskGraph graph = new TaskGraph("body-simulator")
-                .transferToDevice(DataTransferMode.EVERY_EXECUTION,
+                .transferToDevice(DataTransferMode.FIRST_EXECUTION,
                         posX, posY, posZ, velX, velY, velZ, accX, accY, accZ,
                         nextAccX, nextAccY, nextAccZ, mass, active, state)
-                .transferToDevice(DataTransferMode.FIRST_EXECUTION, params)
+                .transferToDevice(DataTransferMode.EVERY_EXECUTION, params)
                 .task("current-acceleration", BodyPhysicsKernels::computeAcceleration,
                         posX, posY, posZ, accX, accY, accZ, mass, active, params, state)
                 .task("position-update", BodyPhysicsKernels::updatePositions,
@@ -1046,7 +1272,8 @@ public class BodySimulator extends Application {
                 .task("next-acceleration-velocity-update", BodyPhysicsKernels::computeNextAccelerationAndUpdateVelocity,
                         posX, posY, posZ, velX, velY, velZ, accX, accY, accZ,
                         nextAccX, nextAccY, nextAccZ, mass, active, params, state)
-                .transferToHost(DataTransferMode.EVERY_EXECUTION, posX, posY, posZ, velX, velY, velZ, accX, accY, accZ);
+                .transferToHost(DataTransferMode.UNDER_DEMAND,
+                        posX, posY, posZ, velX, velY, velZ, accX, accY, accZ);
         TornadoExecutionPlan nextPlan = new TornadoExecutionPlan(graph.snapshot());
         try {
             executionPlan = TornadoDeviceSelector.applyDevice(nextPlan, selectedDevice);
@@ -1055,28 +1282,895 @@ public class BodySimulator extends Application {
             throw failure;
         }
         planDirty = false;
+        return new PlanRebuildTiming(true, System.nanoTime() - rebuildStartNanos);
     }
 
     private void stepSimulation() {
         if (CPU_PHYSICS) {
-            BodyPhysicsKernels.simulateOnCpu(
-                    posX, posY, posZ, velX, velY, velZ, accX, accY, accZ,
-                    nextAccX, nextAccY, nextAccZ, mass, active, params, state);
+            stepSimulationOnCpu();
         } else {
             rebuildPlanIfNeeded();
-            executionPlan.execute();
+            executeGpuStep(true);
         }
         invalidateGridGeometry();
     }
 
+    private void stepSimulationOnCpu() {
+        BodyPhysicsKernels.simulateOnCpu(
+                posX, posY, posZ, velX, velY, velZ, accX, accY, accZ,
+                nextAccX, nextAccY, nextAccZ, mass, active, params, state);
+        simulationStepCounter++;
+    }
+
+    private SimulationStepTiming executeGpuStep(boolean publishSnapshot) {
+        long executeStartNanos = System.nanoTime();
+        TornadoExecutionResult executionResult = executionPlan.execute();
+        long executeNanos = System.nanoTime() - executeStartNanos;
+        simulationStepCounter++;
+
+        long readbackNanos = 0L;
+        if (publishSnapshot) {
+            long readbackStartNanos = System.nanoTime();
+            executionResult.transferToHost(posX, posY, posZ, velX, velY, velZ, accX, accY, accZ);
+            readbackNanos = System.nanoTime() - readbackStartNanos;
+            publishRenderSnapshot(System.nanoTime());
+        }
+        return new SimulationStepTiming(executeNanos, readbackNanos, publishSnapshot);
+    }
+
+    private GpuWarmupTiming warmGpuAfterHostMerge() {
+        long totalStartNanos = System.nanoTime();
+        gpuPostMergeWarmupPending = false;
+        gpuPostMergeWarmupInProgress = true;
+        PlanRebuildTiming rebuildTiming = new PlanRebuildTiming(false, 0L);
+        long executeNanos = 0L;
+        boolean warmed = false;
+        int originalStepCounter = simulationStepCounter;
+        float originalDt = params.get(1);
+        params.set(1, 0.0f);
+        try {
+            rebuildTiming = rebuildPlanIfNeeded();
+            long executeStartNanos = System.nanoTime();
+            executionPlan.execute();
+            executeNanos = System.nanoTime() - executeStartNanos;
+            simulationStepCounter = originalStepCounter;
+            publishRenderSnapshot(System.nanoTime());
+            warmed = true;
+        } finally {
+            params.set(1, originalDt);
+            simulationStepCounter = originalStepCounter;
+            gpuPostMergeWarmupInProgress = false;
+        }
+        return new GpuWarmupTiming(
+                warmed,
+                System.nanoTime() - totalStartNanos,
+                rebuildTiming.rebuildNanos(),
+                executeNanos,
+                bodyCount);
+    }
+
+    private void startSimulationWorker() {
+        if (simulationWorker != null && simulationWorker.isAlive()) {
+            return;
+        }
+        simulationWorkerStopRequested.set(false);
+        simulationWorker = new Thread(this::runSimulationWorker, "body-simulator-gpu-worker");
+        simulationWorker.setDaemon(true);
+        simulationWorker.start();
+    }
+
+    private void runSimulationWorker() {
+        try {
+            long nextStepNanos = System.nanoTime();
+            long lastTimingSummaryNanos = nextStepNanos;
+            WorkerTiming timing = new WorkerTiming();
+            while (!simulationWorkerStopRequested.get()) {
+                if (!running || bodyCount <= 0) {
+                    LockSupport.parkNanos(Math.min(SIMULATION_STEP_INTERVAL_NANOS, 1_000_000L));
+                    nextStepNanos = System.nanoTime();
+                    continue;
+                }
+                if (gpuPostMergeCpuBridgeActive) {
+                    LockSupport.parkNanos(Math.min(SIMULATION_STEP_INTERVAL_NANOS, 1_000_000L));
+                    nextStepNanos = System.nanoTime();
+                    continue;
+                }
+
+                long stepStartNanos = System.nanoTime();
+                PlanRebuildTiming rebuildTiming;
+                SimulationStepTiming stepTiming;
+                GpuWarmupTiming postMergeWarmupTiming = null;
+                simulationLock.lock();
+                try {
+                    if (!running || bodyCount <= 0) {
+                        continue;
+                    }
+                    if (gpuPostMergeWarmupPending) {
+                        postMergeWarmupTiming = warmGpuAfterHostMerge();
+                        rebuildTiming = new PlanRebuildTiming(false, 0L);
+                        stepTiming = new SimulationStepTiming(0L, 0L, false);
+                    } else {
+                        rebuildTiming = rebuildPlanIfNeeded();
+                        stepTiming = executeGpuStep(simulationStepCounter % RENDER_READBACK_INTERVAL_FRAMES == 0);
+                    }
+                } finally {
+                    simulationLock.unlock();
+                }
+                if (postMergeWarmupTiming != null) {
+                    printPostMergeWarmupSummary(postMergeWarmupTiming);
+                    nextStepNanos = System.nanoTime();
+                    continue;
+                }
+                timing.record(rebuildTiming, stepTiming, System.nanoTime() - stepStartNanos);
+                if (FRAME_TIMING_ENABLED && timing.frames() >= FRAME_TIMING_SUMMARY_FRAMES) {
+                    printWorkerTimingSummary(timing, System.nanoTime() - lastTimingSummaryNanos);
+                    timing.reset();
+                    lastTimingSummaryNanos = System.nanoTime();
+                }
+
+                nextStepNanos += SIMULATION_STEP_INTERVAL_NANOS;
+                long sleepNanos = nextStepNanos - System.nanoTime();
+                if (sleepNanos > 0L) {
+                    LockSupport.parkNanos(sleepNanos);
+                } else {
+                    nextStepNanos = System.nanoTime();
+                }
+            }
+        } catch (RuntimeException | Error failure) {
+            running = false;
+            System.err.printf(Locale.ROOT, "BodySimulator worker failed: %s%n", failure.getMessage());
+            failure.printStackTrace(System.err);
+        }
+    }
+
+    private void stopSimulationWorker() {
+        simulationWorkerStopRequested.set(true);
+        Thread worker = simulationWorker;
+        if (worker == null || worker == Thread.currentThread()) {
+            simulationWorker = null;
+            return;
+        }
+        worker.interrupt();
+        try {
+            worker.join(500L);
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+        }
+        simulationWorker = null;
+    }
+
+    private boolean updateInterpolatedRenderState(long now) {
+        RenderSnapshot current = currentRenderSnapshot;
+        if (current == null) {
+            copyCurrentStateToRenderState();
+            return false;
+        }
+        RenderSnapshot previous = previousRenderSnapshot;
+        boolean appliedSnapshot = current.step() != appliedSnapshotStep;
+        appliedSnapshotStep = current.step();
+        if (previous == null || previous.step() == current.step()
+                || current.capturedAtNanos() <= previous.capturedAtNanos()) {
+            copySnapshotToRenderState(current);
+            return appliedSnapshot;
+        }
+
+        long renderTimeNanos = now - SIMULATION_STEP_INTERVAL_NANOS;
+        double alpha = (double) (renderTimeNanos - previous.capturedAtNanos())
+                / (double) (current.capturedAtNanos() - previous.capturedAtNanos());
+        alpha = Math.clamp(alpha, 0.0, 1.0);
+        renderBodyCount = current.bodyCount();
+        int interpolatedCount = Math.min(previous.bodyCount(), current.bodyCount());
+        for (int i = 0; i < interpolatedCount; i++) {
+            renderPosX[i] = interpolate(previous.posX()[i], current.posX()[i], alpha);
+            renderPosY[i] = interpolate(previous.posY()[i], current.posY()[i], alpha);
+            renderPosZ[i] = interpolate(previous.posZ()[i], current.posZ()[i], alpha);
+        }
+        for (int i = interpolatedCount; i < current.bodyCount(); i++) {
+            renderPosX[i] = current.posX()[i];
+            renderPosY[i] = current.posY()[i];
+            renderPosZ[i] = current.posZ()[i];
+        }
+        copyRenderTelemetry(current);
+        return appliedSnapshot;
+    }
+
+    private boolean stepPostMergeCpuBridge(long now) {
+        simulationLock.lock();
+        try {
+            if (!gpuPostMergeCpuBridgeActive || !running || bodyCount <= 0) {
+                return false;
+            }
+            stepSimulationOnCpu();
+            resolveBodyCollisions();
+            copyCurrentStateToRenderState();
+            publishRenderSnapshot(now);
+            return true;
+        } finally {
+            simulationLock.unlock();
+        }
+    }
+
+    private void copySnapshotToRenderState(RenderSnapshot snapshot) {
+        renderBodyCount = snapshot.bodyCount();
+        System.arraycopy(snapshot.posX(), 0, renderPosX, 0, MAX_BODIES);
+        System.arraycopy(snapshot.posY(), 0, renderPosY, 0, MAX_BODIES);
+        System.arraycopy(snapshot.posZ(), 0, renderPosZ, 0, MAX_BODIES);
+        copyRenderTelemetry(snapshot);
+    }
+
+    private void copyRenderTelemetry(RenderSnapshot snapshot) {
+        System.arraycopy(snapshot.velX(), 0, renderVelX, 0, MAX_BODIES);
+        System.arraycopy(snapshot.velY(), 0, renderVelY, 0, MAX_BODIES);
+        System.arraycopy(snapshot.velZ(), 0, renderVelZ, 0, MAX_BODIES);
+        System.arraycopy(snapshot.accX(), 0, renderAccX, 0, MAX_BODIES);
+        System.arraycopy(snapshot.accY(), 0, renderAccY, 0, MAX_BODIES);
+        System.arraycopy(snapshot.accZ(), 0, renderAccZ, 0, MAX_BODIES);
+    }
+
+    private void copyCurrentStateToRenderState() {
+        simulationLock.lock();
+        try {
+            renderBodyCount = bodyCount;
+            for (int i = 0; i < MAX_BODIES; i++) {
+                renderPosX[i] = posX.get(i);
+                renderPosY[i] = posY.get(i);
+                renderPosZ[i] = posZ.get(i);
+                renderVelX[i] = velX.get(i);
+                renderVelY[i] = velY.get(i);
+                renderVelZ[i] = velZ.get(i);
+                renderAccX[i] = accX.get(i);
+                renderAccY[i] = accY.get(i);
+                renderAccZ[i] = accZ.get(i);
+            }
+        } finally {
+            simulationLock.unlock();
+        }
+    }
+
+    private void publishRenderSnapshot(long capturedAtNanos) {
+        RenderSnapshot snapshot;
+        simulationLock.lock();
+        try {
+            snapshot = new RenderSnapshot(
+                    simulationStepCounter,
+                    capturedAtNanos,
+                    bodyCount,
+                    copy(posX), copy(posY), copy(posZ),
+                    copy(velX), copy(velY), copy(velZ),
+                    copy(accX), copy(accY), copy(accZ));
+        } finally {
+            simulationLock.unlock();
+        }
+        previousRenderSnapshot = currentRenderSnapshot;
+        currentRenderSnapshot = snapshot;
+    }
+
+    private void resetRenderSnapshots() {
+        previousRenderSnapshot = null;
+        currentRenderSnapshot = null;
+        appliedSnapshotStep = -1;
+        copyCurrentStateToRenderState();
+    }
+
+    private int visualBodyCount() {
+        if (renderBodyCount <= 0) {
+            return bodyCount;
+        }
+        return Math.min(renderBodyCount, bodyCount);
+    }
+
+    private float visualPosX(int index) {
+        return renderBodyCount > 0 ? renderPosX[index] : posX.get(index);
+    }
+
+    private float visualPosY(int index) {
+        return renderBodyCount > 0 ? renderPosY[index] : posY.get(index);
+    }
+
+    private float visualPosZ(int index) {
+        return renderBodyCount > 0 ? renderPosZ[index] : posZ.get(index);
+    }
+
+    private float visualVelX(int index) {
+        return renderBodyCount > 0 ? renderVelX[index] : velX.get(index);
+    }
+
+    private float visualVelY(int index) {
+        return renderBodyCount > 0 ? renderVelY[index] : velY.get(index);
+    }
+
+    private float visualVelZ(int index) {
+        return renderBodyCount > 0 ? renderVelZ[index] : velZ.get(index);
+    }
+
+    private float visualAccX(int index) {
+        return renderBodyCount > 0 ? renderAccX[index] : accX.get(index);
+    }
+
+    private float visualAccY(int index) {
+        return renderBodyCount > 0 ? renderAccY[index] : accY.get(index);
+    }
+
+    private float visualAccZ(int index) {
+        return renderBodyCount > 0 ? renderAccZ[index] : accZ.get(index);
+    }
+
+    private void resolveBodyCollisionsFromSnapshot() {
+        if (gpuPostMergeCpuBridgeActive || gpuPostMergeWarmupPending || gpuPostMergeWarmupInProgress) {
+            return;
+        }
+        if (!simulationLock.tryLock()) {
+            return;
+        }
+        try {
+            if (gpuPostMergeCpuBridgeActive || gpuPostMergeWarmupPending || gpuPostMergeWarmupInProgress) {
+                return;
+            }
+            resolveBodyCollisions();
+            publishRenderSnapshot(System.nanoTime());
+        } finally {
+            simulationLock.unlock();
+        }
+    }
+
+    private boolean shouldUpdateDashboard(int frame, boolean appliedSnapshot) {
+        if (!running) {
+            return true;
+        }
+        if (!CPU_PHYSICS && !appliedSnapshot) {
+            return false;
+        }
+        if (frame - lastDashboardFrame < DASHBOARD_UPDATE_FRAMES) {
+            return false;
+        }
+        lastDashboardFrame = frame;
+        return true;
+    }
+
+    private static float interpolate(float from, float to, double alpha) {
+        return (float) (from + (to - from) * alpha);
+    }
+
+    private void printWorkerTimingSummary(WorkerTiming timing, long elapsedNanos) {
+        System.out.printf(Locale.ROOT,
+                "BodySimulator worker summary steps=%d elapsed=%.3fms avgStep=%.3fms maxStep=%.3fms "
+                        + "avgRebuild=%.3fms maxRebuild=%.3fms rebuilt=%d "
+                        + "avgExecute=%.3fms maxExecute=%.3fms avgReadback=%.3fms maxReadback=%.3fms "
+                        + "published=%d readbackInterval=%d stepInterval=%.3fms%n",
+                timing.frames(),
+                toMillis(elapsedNanos),
+                toMillis(timing.totalStepNanos()) / timing.frames(),
+                toMillis(timing.maxStepNanos()),
+                timing.rebuilds() == 0 ? 0.0 : toMillis(timing.totalRebuildNanos()) / timing.rebuilds(),
+                toMillis(timing.maxRebuildNanos()),
+                timing.rebuilds(),
+                toMillis(timing.totalExecuteNanos()) / timing.frames(),
+                toMillis(timing.maxExecuteNanos()),
+                timing.publishedSnapshots() == 0 ? 0.0 : toMillis(timing.totalReadbackNanos()) / timing.publishedSnapshots(),
+                toMillis(timing.maxReadbackNanos()),
+                timing.publishedSnapshots(),
+                RENDER_READBACK_INTERVAL_FRAMES,
+                toMillis(SIMULATION_STEP_INTERVAL_NANOS));
+    }
+
+    private void printPostMergeWarmupSummary(GpuWarmupTiming timing) {
+        if (!FRAME_TIMING_ENABLED) {
+            return;
+        }
+        System.out.printf(Locale.ROOT,
+                "BodySimulator post-merge GPU warmup summary warmed=%s elapsed=%.3fms rebuild=%.3fms "
+                        + "execute=%.3fms bodyCount=%d planDirty=%s%n",
+                timing.warmed(),
+                toMillis(timing.totalNanos()),
+                toMillis(timing.rebuildNanos()),
+                toMillis(timing.executeNanos()),
+                timing.bodyCount(),
+                planDirty);
+    }
+
+    private static double toMillis(long nanos) {
+        return nanos / 1_000_000.0;
+    }
+
+    private static final class WorkerTiming {
+        private int frames;
+        private int publishedSnapshots;
+        private long totalStepNanos;
+        private long totalRebuildNanos;
+        private long totalExecuteNanos;
+        private long totalReadbackNanos;
+        private long maxStepNanos;
+        private long maxRebuildNanos;
+        private long maxExecuteNanos;
+        private long maxReadbackNanos;
+        private int rebuilds;
+
+        void record(PlanRebuildTiming rebuildTiming, SimulationStepTiming timing, long stepNanos) {
+            frames++;
+            totalStepNanos += stepNanos;
+            totalRebuildNanos += rebuildTiming.rebuildNanos();
+            totalExecuteNanos += timing.executeNanos();
+            totalReadbackNanos += timing.readbackNanos();
+            maxStepNanos = Math.max(maxStepNanos, stepNanos);
+            maxRebuildNanos = Math.max(maxRebuildNanos, rebuildTiming.rebuildNanos());
+            maxExecuteNanos = Math.max(maxExecuteNanos, timing.executeNanos());
+            maxReadbackNanos = Math.max(maxReadbackNanos, timing.readbackNanos());
+            if (rebuildTiming.rebuilt()) {
+                rebuilds++;
+            }
+            if (timing.publishedSnapshot()) {
+                publishedSnapshots++;
+            }
+        }
+
+        void reset() {
+            frames = 0;
+            publishedSnapshots = 0;
+            totalStepNanos = 0L;
+            totalRebuildNanos = 0L;
+            totalExecuteNanos = 0L;
+            totalReadbackNanos = 0L;
+            maxStepNanos = 0L;
+            maxRebuildNanos = 0L;
+            maxExecuteNanos = 0L;
+            maxReadbackNanos = 0L;
+            rebuilds = 0;
+        }
+
+        int frames() {
+            return frames;
+        }
+
+        int publishedSnapshots() {
+            return publishedSnapshots;
+        }
+
+        long totalStepNanos() {
+            return totalStepNanos;
+        }
+
+        long totalExecuteNanos() {
+            return totalExecuteNanos;
+        }
+
+        long totalRebuildNanos() {
+            return totalRebuildNanos;
+        }
+
+        long totalReadbackNanos() {
+            return totalReadbackNanos;
+        }
+
+        long maxStepNanos() {
+            return maxStepNanos;
+        }
+
+        long maxExecuteNanos() {
+            return maxExecuteNanos;
+        }
+
+        long maxRebuildNanos() {
+            return maxRebuildNanos;
+        }
+
+        long maxReadbackNanos() {
+            return maxReadbackNanos;
+        }
+
+        int rebuilds() {
+            return rebuilds;
+        }
+    }
+
+    private static final class FrameTiming {
+        private int frames;
+        private long totalFrameNanos;
+        private long totalSimulationNanos;
+        private long totalDrawNanos;
+        private long totalGridNanos;
+        private long totalGridRebuildNanos;
+        private long totalGridSnapshotNanos;
+        private long totalGuidesNanos;
+        private long totalTrailsNanos;
+        private long totalPhotonNanos;
+        private long totalBodiesNanos;
+        private long totalIndicatorNanos;
+        private long totalDashboardNanos;
+        private long maxFrameNanos;
+        private long maxSimulationNanos;
+        private long maxDrawNanos;
+        private long maxGridNanos;
+        private long maxGridRebuildNanos;
+        private long maxGridSnapshotNanos;
+        private long maxGuidesNanos;
+        private long maxTrailsNanos;
+        private long maxPhotonNanos;
+        private long maxBodiesNanos;
+        private long maxIndicatorNanos;
+        private long maxDashboardNanos;
+
+        void record(int frame, long elapsedNanos, long simulationNanos, long photonNanos, long drawNanos,
+                    long dashboardNanos, DrawTiming drawTiming, boolean appliedSnapshot, long frameNanos) {
+            if (!FRAME_TIMING_ENABLED) {
+                return;
+            }
+            frames++;
+            totalFrameNanos += frameNanos;
+            totalSimulationNanos += simulationNanos;
+            totalDrawNanos += drawNanos;
+            totalGridNanos += drawTiming.gridNanos();
+            totalGridRebuildNanos += drawTiming.gridRebuildNanos();
+            totalGridSnapshotNanos += drawTiming.gridSnapshotNanos();
+            totalGuidesNanos += drawTiming.guidesNanos();
+            totalTrailsNanos += drawTiming.trailsNanos();
+            totalPhotonNanos += drawTiming.photonNanos();
+            totalBodiesNanos += drawTiming.bodiesNanos();
+            totalIndicatorNanos += drawTiming.indicatorNanos();
+            totalDashboardNanos += dashboardNanos;
+            maxFrameNanos = Math.max(maxFrameNanos, frameNanos);
+            maxSimulationNanos = Math.max(maxSimulationNanos, simulationNanos);
+            maxDrawNanos = Math.max(maxDrawNanos, drawNanos);
+            maxGridNanos = Math.max(maxGridNanos, drawTiming.gridNanos());
+            maxGridRebuildNanos = Math.max(maxGridRebuildNanos, drawTiming.gridRebuildNanos());
+            maxGridSnapshotNanos = Math.max(maxGridSnapshotNanos, drawTiming.gridSnapshotNanos());
+            maxGuidesNanos = Math.max(maxGuidesNanos, drawTiming.guidesNanos());
+            maxTrailsNanos = Math.max(maxTrailsNanos, drawTiming.trailsNanos());
+            maxPhotonNanos = Math.max(maxPhotonNanos, drawTiming.photonNanos());
+            maxBodiesNanos = Math.max(maxBodiesNanos, drawTiming.bodiesNanos());
+            maxIndicatorNanos = Math.max(maxIndicatorNanos, drawTiming.indicatorNanos());
+            maxDashboardNanos = Math.max(maxDashboardNanos, dashboardNanos);
+
+            if (toMillis(frameNanos) >= FRAME_TIMING_SLOW_MS) {
+                System.out.printf(Locale.ROOT,
+                        "BodySimulator slow frame %d total=%.3fms elapsed=%.3fms renderState=%.3fms "
+                                + "photon=%.3fms draw=%.3fms grid=%.3fms gridRebuild=%.3fms gridSnapshot=%.3fms "
+                                + "guides=%.3fms trails=%.3fms bodies=%.3fms indicator=%.3fms "
+                                + "dashboard=%.3fms appliedSnapshot=%s%n",
+                        frame,
+                        toMillis(frameNanos),
+                        toMillis(elapsedNanos),
+                        toMillis(simulationNanos),
+                        toMillis(photonNanos),
+                        toMillis(drawNanos),
+                        toMillis(drawTiming.gridNanos()),
+                        toMillis(drawTiming.gridRebuildNanos()),
+                        toMillis(drawTiming.gridSnapshotNanos()),
+                        toMillis(drawTiming.guidesNanos()),
+                        toMillis(drawTiming.trailsNanos()),
+                        toMillis(drawTiming.bodiesNanos()),
+                        toMillis(drawTiming.indicatorNanos()),
+                        toMillis(dashboardNanos),
+                        appliedSnapshot);
+            }
+            if (frames >= FRAME_TIMING_SUMMARY_FRAMES) {
+                System.out.printf(Locale.ROOT,
+                        "BodySimulator UI summary frames=%d avgTotal=%.3fms maxTotal=%.3fms "
+                                + "avgRenderState=%.3fms maxRenderState=%.3fms avgDraw=%.3fms maxDraw=%.3fms "
+                                + "avgGrid=%.3fms maxGrid=%.3fms avgGridRebuild=%.3fms maxGridRebuild=%.3fms "
+                                + "avgGridSnapshot=%.3fms maxGridSnapshot=%.3fms avgGuides=%.3fms maxGuides=%.3fms "
+                                + "avgTrails=%.3fms maxTrails=%.3fms avgBodies=%.3fms maxBodies=%.3fms "
+                                + "avgIndicator=%.3fms maxIndicator=%.3fms avgDashboard=%.3fms maxDashboard=%.3fms%n",
+                        frames,
+                        toMillis(totalFrameNanos) / frames,
+                        toMillis(maxFrameNanos),
+                        toMillis(totalSimulationNanos) / frames,
+                        toMillis(maxSimulationNanos),
+                        toMillis(totalDrawNanos) / frames,
+                        toMillis(maxDrawNanos),
+                        toMillis(totalGridNanos) / frames,
+                        toMillis(maxGridNanos),
+                        toMillis(totalGridRebuildNanos) / frames,
+                        toMillis(maxGridRebuildNanos),
+                        toMillis(totalGridSnapshotNanos) / frames,
+                        toMillis(maxGridSnapshotNanos),
+                        toMillis(totalGuidesNanos) / frames,
+                        toMillis(maxGuidesNanos),
+                        toMillis(totalTrailsNanos) / frames,
+                        toMillis(maxTrailsNanos),
+                        toMillis(totalBodiesNanos) / frames,
+                        toMillis(maxBodiesNanos),
+                        toMillis(totalIndicatorNanos) / frames,
+                        toMillis(maxIndicatorNanos),
+                        toMillis(totalDashboardNanos) / frames,
+                        toMillis(maxDashboardNanos));
+                reset();
+            }
+        }
+
+        private void reset() {
+            frames = 0;
+            totalFrameNanos = 0L;
+            totalSimulationNanos = 0L;
+            totalDrawNanos = 0L;
+            totalGridNanos = 0L;
+            totalGridRebuildNanos = 0L;
+            totalGridSnapshotNanos = 0L;
+            totalGuidesNanos = 0L;
+            totalTrailsNanos = 0L;
+            totalPhotonNanos = 0L;
+            totalBodiesNanos = 0L;
+            totalIndicatorNanos = 0L;
+            totalDashboardNanos = 0L;
+            maxFrameNanos = 0L;
+            maxSimulationNanos = 0L;
+            maxDrawNanos = 0L;
+            maxGridNanos = 0L;
+            maxGridRebuildNanos = 0L;
+            maxGridSnapshotNanos = 0L;
+            maxGuidesNanos = 0L;
+            maxTrailsNanos = 0L;
+            maxPhotonNanos = 0L;
+            maxBodiesNanos = 0L;
+            maxIndicatorNanos = 0L;
+            maxDashboardNanos = 0L;
+        }
+    }
+
+    private void prepareStoppedExecutionPlan() {
+        if (CPU_PHYSICS || running || bodyCount <= 0 || selectedDevice == null) {
+            return;
+        }
+
+        if (!GPU_WARMUP_ENABLED) {
+            simulationLock.lock();
+            try {
+                rebuildPlanIfNeeded();
+                publishRenderSnapshot(System.nanoTime());
+            } finally {
+                simulationLock.unlock();
+            }
+            return;
+        }
+        scheduleStoppedWarmup();
+        publishRenderSnapshot(System.nanoTime());
+    }
+
+    private void scheduleStoppedWarmup() {
+        if (gpuWarmupReady || gpuWarmupInProgress || running || bodyCount <= 0 || selectedDevice == null) {
+            return;
+        }
+        if (!Platform.isFxApplicationThread()) {
+            startStoppedWarmupWorker();
+            return;
+        }
+        if (gpuWarmupDebounceTimer == null) {
+            gpuWarmupDebounceTimer = new PauseTransition(Duration.millis(toMillis(GPU_WARMUP_DEBOUNCE_NANOS)));
+            gpuWarmupDebounceTimer.setOnFinished(_ -> startStoppedWarmupWorker());
+        }
+        gpuWarmupDebounceTimer.stop();
+        gpuWarmupDebounceTimer.playFromStart();
+    }
+
+    private void startStoppedWarmupWorker() {
+        if (stopped || gpuWarmupReady || gpuWarmupInProgress) {
+            return;
+        }
+        Thread currentWarmup = warmupWorker;
+        if (currentWarmup != null && currentWarmup.isAlive()) {
+            return;
+        }
+        int requestedGeneration = warmupGeneration;
+        gpuWarmupInProgress = true;
+        warmupWorker = new Thread(() -> runStoppedWarmup(requestedGeneration), "body-simulator-gpu-warmup");
+        warmupWorker.setDaemon(true);
+        warmupWorker.start();
+    }
+
+    private void runStoppedWarmup() {
+        runStoppedWarmup(warmupGeneration);
+    }
+
+    private void runStoppedWarmup(int requestedGeneration) {
+        long warmupStartNanos = System.nanoTime();
+        PlanRebuildTiming rebuildTiming = new PlanRebuildTiming(false, 0L);
+        long executeNanos = 0L;
+        boolean warmed = false;
+        boolean stale = false;
+        try {
+            simulationLock.lock();
+            try {
+                if (requestedGeneration != warmupGeneration) {
+                    stale = true;
+                    return;
+                }
+                if (running || bodyCount <= 0 || selectedDevice == null) {
+                    return;
+                }
+                int originalStepCounter = simulationStepCounter;
+                float originalDt = params.get(1);
+                params.set(1, 0.0f);
+                try {
+                    rebuildTiming = rebuildPlanIfNeeded();
+                    long executeStartNanos = System.nanoTime();
+                    executionPlan.execute();
+                    executeNanos = System.nanoTime() - executeStartNanos;
+                } finally {
+                    params.set(1, originalDt);
+                }
+                simulationStepCounter = originalStepCounter;
+                gpuWarmupReady = true;
+                warmed = true;
+            } finally {
+                simulationLock.unlock();
+            }
+        } catch (RuntimeException | Error failure) {
+            gpuWarmupReady = false;
+            System.err.printf(Locale.ROOT, "BodySimulator warmup failed: %s%n", failure.getMessage());
+            failure.printStackTrace(System.err);
+        } finally {
+            gpuWarmupInProgress = false;
+            if (FRAME_TIMING_ENABLED) {
+                System.out.printf(Locale.ROOT,
+                        "BodySimulator warmup summary warmed=%s stale=%s elapsed=%.3fms rebuild=%.3fms execute=%.3fms bodyCount=%d generation=%d%n",
+                        warmed,
+                        stale,
+                        toMillis(System.nanoTime() - warmupStartNanos),
+                        toMillis(rebuildTiming.rebuildNanos()),
+                        toMillis(executeNanos),
+                        bodyCount,
+                        warmupGeneration);
+            }
+            if (stale && !stopped && !running && bodyCount > 0 && selectedDevice != null) {
+                startStoppedWarmupWorker();
+            }
+        }
+    }
+
+    private float[] copy(FloatArray source) {
+        float[] values = new float[MAX_BODIES];
+        for (int i = 0; i < MAX_BODIES; i++) {
+            values[i] = source.get(i);
+        }
+        return values;
+    }
+
     private void invalidateExecutionPlan() {
         planDirty = true;
+        gpuPostMergeCpuBridgeActive = false;
+        gpuPostMergeWarmupPending = false;
+        gpuPostMergeWarmupInProgress = false;
+        markWarmupDirty();
         invalidateGridGeometry();
         closeExecutionPlan();
     }
 
+    private void deferExecutionPlanRebuild() {
+        planDirty = true;
+        markWarmupDirty();
+    }
+
+    private void markWarmupDirty() {
+        gpuWarmupReady = false;
+        warmupGeneration++;
+    }
+
     private void invalidateGridGeometry() {
         gridGeometryDirty = true;
+        cachedGridImageDirty = true;
+    }
+
+    private void deferGridGeometryRefresh() {
+        if (cachedGridImage == null) {
+            invalidateGridGeometry();
+            return;
+        }
+        gridCacheRefreshPending = true;
+    }
+
+    private void consumeDeferredGridRefresh() {
+        if (!gridCacheRefreshPending) {
+            return;
+        }
+        gridCacheRefreshPending = false;
+        invalidateGridGeometry();
+    }
+
+    private void scheduleEditorRebuild() {
+        if (editorRebuildPending) {
+            return;
+        }
+        editorRebuildPending = true;
+        if (running) {
+            Platform.runLater(this::syncLiveEditorsAfterCollision);
+            return;
+        }
+        Platform.runLater(() -> {
+            long rebuildStartNanos = System.nanoTime();
+            try {
+                rebuildEditors();
+            } finally {
+                editorRebuildPending = false;
+                if (FRAME_TIMING_ENABLED) {
+                    System.out.printf(Locale.ROOT,
+                            "BodySimulator editor rebuild summary elapsed=%.3fms bodyCount=%d%n",
+                            toMillis(System.nanoTime() - rebuildStartNanos),
+                            bodyCount);
+                }
+            }
+        });
+    }
+
+    private void syncLiveEditorsAfterCollision() {
+        long syncStartNanos = System.nanoTime();
+        int hiddenRows = 0;
+        int addedRows = 0;
+        int refreshedRows = 0;
+        suppressEditorApply = true;
+        try {
+            int existingRows = editorList.getChildren().size();
+            int reusableRows = Math.min(existingRows, bodyCount);
+            for (int i = 0; i < reusableRows; i++) {
+                Node row = editorList.getChildren().get(i);
+                row.setManaged(true);
+                row.setVisible(true);
+                refreshEditorRow(i);
+                refreshedRows++;
+            }
+            if (!running) {
+                for (int i = reusableRows; i < bodyCount; i++) {
+                    editorList.getChildren().add(createEditor(i));
+                    addedRows++;
+                }
+            }
+            for (int i = bodyCount; i < existingRows; i++) {
+                Node row = editorList.getChildren().get(i);
+                row.setManaged(false);
+                row.setVisible(false);
+                clearEditorFieldReferences(i);
+                hiddenRows++;
+            }
+            if (!running) {
+                while (editorList.getChildren().size() > bodyCount) {
+                    int removedIndex = editorList.getChildren().size() - 1;
+                    editorList.getChildren().remove(removedIndex);
+                    clearEditorFieldReferences(removedIndex);
+                }
+            }
+            if (!running) {
+                for (int i = 0; i < bodyCount; i++) {
+                    if (i >= existingRows) {
+                        continue;
+                    }
+                    updateEditorFields(i);
+                }
+            }
+        } finally {
+            suppressEditorApply = false;
+            editorRebuildPending = false;
+            if (FRAME_TIMING_ENABLED) {
+                System.out.printf(Locale.ROOT,
+                        "BodySimulator editor sync summary elapsed=%.3fms bodyCount=%d rows=%d refreshed=%d added=%d hidden=%d running=%s%n",
+                        toMillis(System.nanoTime() - syncStartNanos),
+                        bodyCount,
+                        editorList.getChildren().size(),
+                        refreshedRows,
+                        addedRows,
+                        hiddenRows,
+                        running);
+            }
+        }
+    }
+
+    private void refreshEditorRow(int index) {
+        if (index >= editorList.getChildren().size()) {
+            return;
+        }
+        if (editorList.getChildren().get(index) instanceof VBox editor
+                && !editor.getChildren().isEmpty()
+                && editor.getChildren().getFirst() instanceof Label label) {
+            label.setText(names[index]);
+            label.setStyle("-fx-text-fill: " + toHex(colors[index]) + "; -fx-font-weight: bold;");
+        }
+    }
+
+    private void clearEditorFieldReferences(int index) {
+        positionXFields[index] = null;
+        positionYFields[index] = null;
+        positionZFields[index] = null;
+        velocityXFields[index] = null;
+        velocityYFields[index] = null;
+        velocityZFields[index] = null;
+        massFields[index] = null;
     }
 
     private void closeExecutionPlan() {
@@ -1097,18 +2191,20 @@ public class BodySimulator extends Application {
     }
 
     private void appendTrails() {
-        for (int i = 0; i < bodyCount; i++) {
+        int count = visualBodyCount();
+        for (int i = 0; i < count; i++) {
             Deque<Point3> trail = trails[i];
             if (trail.size() >= TRAIL_CAPACITY) {
                 trail.removeFirst();
             }
-            trail.addLast(new Point3(posX.get(i), posY.get(i), posZ.get(i)));
+            trail.addLast(new Point3(visualPosX(i), visualPosY(i), visualPosZ(i)));
         }
     }
 
     private void appendFullTracks() {
-        for (int i = 0; i < bodyCount; i++) {
-            fullTracks[i].add(new Point3(posX.get(i), posY.get(i), posZ.get(i)));
+        int count = visualBodyCount();
+        for (int i = 0; i < count; i++) {
+            fullTracks[i].add(new Point3(visualPosX(i), visualPosY(i), visualPosZ(i)));
         }
     }
 
@@ -1198,14 +2294,17 @@ public class BodySimulator extends Application {
         return String.format(Locale.ROOT, "%02d:%02d:%02d", hours, minutes, seconds);
     }
 
-    private void draw() {
+    private DrawTiming draw() {
         GraphicsContext gc = canvas.getGraphicsContext2D();
         double width = canvas.getWidth();
         double height = canvas.getHeight();
         gc.setFill(Color.rgb(4, 6, 12));
         gc.fillRect(0, 0, width, height);
-        drawGravityGrid(gc, width, height);
+        long stageStartNanos = System.nanoTime();
+        GridCacheTiming gridTiming = drawCachedGravityGrid(gc, width, height);
+        long gridNanos = System.nanoTime() - stageStartNanos;
 
+        stageStartNanos = System.nanoTime();
         if (showSchwarzschildRadii) {
             drawSchwarzschildRadii(gc);
         }
@@ -1213,15 +2312,25 @@ public class BodySimulator extends Application {
         if (showOrbits) {
             drawStableOrbitGuides(gc);
         }
+        long guidesNanos = System.nanoTime() - stageStartNanos;
+
+        stageStartNanos = System.nanoTime();
         if (showTrails) {
             drawTrails(gc);
         }
         if (showFullTracks) {
             drawFullTracks(gc);
         }
+        long trailsNanos = System.nanoTime() - stageStartNanos;
+
+        stageStartNanos = System.nanoTime();
         drawPhotonPath(gc);
-        for (int i = 0; i < bodyCount; i++) {
-            double[] projected = projectPoint(posX.get(i), posY.get(i), posZ.get(i));
+        long photonNanos = System.nanoTime() - stageStartNanos;
+
+        stageStartNanos = System.nanoTime();
+        int count = visualBodyCount();
+        for (int i = 0; i < count; i++) {
+            double[] projected = projectPoint(visualPosX(i), visualPosY(i), visualPosZ(i));
             double sx = projected[0];
             double sy = projected[1];
             double r = bodyRadius(i);
@@ -1232,7 +2341,13 @@ public class BodySimulator extends Application {
             gc.setFill(Color.rgb(220, 228, 242));
             gc.fillText(names[i], sx + r + 4.0, sy - r - 2.0);
         }
+        long bodiesNanos = System.nanoTime() - stageStartNanos;
+
+        stageStartNanos = System.nanoTime();
         drawRotationIndicator(gc);
+        long indicatorNanos = System.nanoTime() - stageStartNanos;
+        return new DrawTiming(gridNanos, gridTiming.rebuildNanos(), gridTiming.snapshotNanos(),
+                guidesNanos, trailsNanos, photonNanos, bodiesNanos, indicatorNanos);
     }
 
     private RadialGradient bodySpherePaint(int i, double sx, double sy, double radius) {
@@ -1502,13 +2617,14 @@ public class BodySimulator extends Application {
         double potential = 0.0;
         double shiftX = 0.0;
         double shiftY = 0.0;
-        for (int i = 0; i < bodyCount; i++) {
+        int count = visualBodyCount();
+        for (int i = 0; i < count; i++) {
             if (mass.get(i) <= 0.0f) {
                 continue;
             }
-            double dx = x - posX.get(i);
-            double dy = y - posY.get(i);
-            double dz = posZ.get(i);
+            double dx = x - visualPosX(i);
+            double dy = y - visualPosY(i);
+            double dz = visualPosZ(i);
             double distance = Math.sqrt(dx * dx + dy * dy + dz * dz + SOFTENING);
             potential += -G * mass.get(i) / distance;
             double slope = G * mass.get(i) / (distance * distance * distance);
@@ -1762,13 +2878,14 @@ public class BodySimulator extends Application {
         gc.save();
         gc.setLineWidth(1.5);
         gc.setLineDashes(10.0, 7.0);
-        for (int i = 0; i < bodyCount; i++) {
+        int count = visualBodyCount();
+        for (int i = 0; i < count; i++) {
             if (mass.get(i) < BLACK_HOLE_MASS_THRESHOLD) {
                 continue;
             }
-            double centerX = posX.get(i);
-            double centerY = posY.get(i);
-            double centerZ = posZ.get(i);
+            double centerX = visualPosX(i);
+            double centerY = visualPosY(i);
+            double centerZ = visualPosZ(i);
             double radius = schwarzschildRadius(mass.get(i));
             Color guideColor = colors[i].interpolate(Color.WHITE, 0.55).deriveColor(0.0, 1.0, 1.0, 0.85);
             gc.setStroke(guideColor);
@@ -1815,7 +2932,7 @@ public class BodySimulator extends Application {
         if (center < 0) {
             return;
         }
-        for (int i = 0; i < bodyCount; i++) {
+        for (int i = 0; i < visualBodyCount(); i++) {
             if (i == center || !isStableOrbitCandidate(i, center)) {
                 continue;
             }
@@ -1825,9 +2942,9 @@ public class BodySimulator extends Application {
     }
 
     private void drawStableOrbitGuide(GraphicsContext gc, int bodyIndex, int centerIndex) {
-        double relativeX = posX.get(bodyIndex) - posX.get(centerIndex);
-        double relativeY = posY.get(bodyIndex) - posY.get(centerIndex);
-        double relativeZ = posZ.get(bodyIndex) - posZ.get(centerIndex);
+        double relativeX = visualPosX(bodyIndex) - visualPosX(centerIndex);
+        double relativeY = visualPosY(bodyIndex) - visualPosY(centerIndex);
+        double relativeZ = visualPosZ(bodyIndex) - visualPosZ(centerIndex);
         double radius = Math.sqrt(relativeX * relativeX + relativeY * relativeY + relativeZ * relativeZ);
         if (radius < 0.000001) {
             return;
@@ -1836,9 +2953,9 @@ public class BodySimulator extends Application {
         double e1X = relativeX / radius;
         double e1Y = relativeY / radius;
         double e1Z = relativeZ / radius;
-        double velocityX = velX.get(bodyIndex) - velX.get(centerIndex);
-        double velocityY = velY.get(bodyIndex) - velY.get(centerIndex);
-        double velocityZ = velZ.get(bodyIndex) - velZ.get(centerIndex);
+        double velocityX = visualVelX(bodyIndex) - visualVelX(centerIndex);
+        double velocityY = visualVelY(bodyIndex) - visualVelY(centerIndex);
+        double velocityZ = visualVelZ(bodyIndex) - visualVelZ(centerIndex);
         double normalX = relativeY * velocityZ - relativeZ * velocityY;
         double normalY = relativeZ * velocityX - relativeX * velocityZ;
         double normalZ = relativeX * velocityY - relativeY * velocityX;
@@ -1869,9 +2986,9 @@ public class BodySimulator extends Application {
         e2Y /= e2Length;
         e2Z /= e2Length;
 
-        double centerX = posX.get(centerIndex);
-        double centerY = posY.get(centerIndex);
-        double centerZ = posZ.get(centerIndex);
+        double centerX = visualPosX(centerIndex);
+        double centerY = visualPosY(centerIndex);
+        double centerZ = visualPosZ(centerIndex);
         double[] rotated = new double[3];
         double[] previous = new double[2];
         double[] projected = new double[2];
@@ -1894,16 +3011,16 @@ public class BodySimulator extends Application {
     }
 
     private boolean isStableOrbitCandidate(int bodyIndex, int centerIndex) {
-        float dx = posX.get(bodyIndex) - posX.get(centerIndex);
-        float dy = posY.get(bodyIndex) - posY.get(centerIndex);
-        float dz = posZ.get(bodyIndex) - posZ.get(centerIndex);
+        float dx = visualPosX(bodyIndex) - visualPosX(centerIndex);
+        float dy = visualPosY(bodyIndex) - visualPosY(centerIndex);
+        float dz = visualPosZ(bodyIndex) - visualPosZ(centerIndex);
         float radius = (float) Math.sqrt(dx * dx + dy * dy + dz * dz);
         if (radius < 0.0001f || mass.get(centerIndex) <= 0.0f) {
             return false;
         }
-        float relativeVx = velX.get(bodyIndex) - velX.get(centerIndex);
-        float relativeVy = velY.get(bodyIndex) - velY.get(centerIndex);
-        float relativeVz = velZ.get(bodyIndex) - velZ.get(centerIndex);
+        float relativeVx = visualVelX(bodyIndex) - visualVelX(centerIndex);
+        float relativeVy = visualVelY(bodyIndex) - visualVelY(centerIndex);
+        float relativeVz = visualVelZ(bodyIndex) - visualVelZ(centerIndex);
         float speed = (float) Math.sqrt(relativeVx * relativeVx + relativeVy * relativeVy + relativeVz * relativeVz);
         float circularSpeed = (float) Math.sqrt(G * mass.get(centerIndex) / radius);
         return circularSpeed > 0.0001f && Math.abs(speed - circularSpeed) / circularSpeed < 0.35f;
@@ -1912,7 +3029,7 @@ public class BodySimulator extends Application {
     private int dominantBodyIndex() {
         int best = -1;
         float bestMass = 0.0f;
-        for (int i = 0; i < bodyCount; i++) {
+        for (int i = 0; i < visualBodyCount(); i++) {
             if (mass.get(i) > bestMass) {
                 bestMass = mass.get(i);
                 best = i;
@@ -1926,21 +3043,22 @@ public class BodySimulator extends Application {
         unitCalibrationExplanation.setText(unitCalibrationText());
         dashboardDynamicContent.getChildren().clear();
 
-        if (bodyCount == 0) {
+        int count = visualBodyCount();
+        if (count == 0) {
             Label empty = new Label("Empty space");
             empty.setStyle("-fx-text-fill: #96a2bc;");
             dashboardDynamicContent.getChildren().add(empty);
             return;
         }
-        for (int i = 0; i < bodyCount; i++) {
-            float speed = (float) Math.sqrt(velX.get(i) * velX.get(i) + velY.get(i) * velY.get(i) + velZ.get(i) * velZ.get(i));
-            float accel = (float) Math.sqrt(accX.get(i) * accX.get(i) + accY.get(i) * accY.get(i) + accZ.get(i) * accZ.get(i));
+        for (int i = 0; i < count; i++) {
+            float speed = (float) Math.sqrt(visualVelX(i) * visualVelX(i) + visualVelY(i) * visualVelY(i) + visualVelZ(i) * visualVelZ(i));
+            float accel = (float) Math.sqrt(visualAccX(i) * visualAccX(i) + visualAccY(i) * visualAccY(i) + visualAccZ(i) * visualAccZ(i));
             String nearest = nearestBodyText(i);
             Label label = new Label(String.format(
                     "%s  M %.6g mu (%.6g M☉)  P(%.3f, %.3f, %.3f) du  V(%.3f, %.3f, %.3f) du/s  |V| %.3f du/s  |A| %.5f du/s2  %s",
                     names[i], mass.get(i), simulationMassUnitsToSolarMasses(mass.get(i)),
-                    posX.get(i), posY.get(i), posZ.get(i),
-                    velX.get(i), velY.get(i), velZ.get(i), speed, accel, nearest));
+                    visualPosX(i), visualPosY(i), visualPosZ(i),
+                    visualVelX(i), visualVelY(i), visualVelZ(i), speed, accel, nearest));
             label.setWrapText(true);
             label.setStyle("-fx-text-fill: " + toHex(colors[i]) + "; -fx-font-family: monospace; -fx-font-size: 11px;");
             dashboardDynamicContent.getChildren().add(label);
@@ -1957,7 +3075,7 @@ public class BodySimulator extends Application {
             photonDetails.setStyle("-fx-text-fill: #fffbd0; -fx-font-family: monospace; -fx-font-size: 11px;");
             dashboardDynamicContent.getChildren().add(photonDetails);
 
-            for (int i = 0; i < bodyCount; i++) {
+            for (int i = 0; i < count; i++) {
                 Label radius = new Label(String.format(
                         "%s  Schwarzschild radius %.6f du",
                         names[i], schwarzschildRadius(mass.get(i))));
@@ -2003,19 +3121,19 @@ public class BodySimulator extends Application {
     }
 
     private String nearestBodyText(int bodyIndex) {
-        if (bodyCount < 2) {
+        if (visualBodyCount() < 2) {
             return "Nearest: -";
         }
 
         int nearestIndex = -1;
         double nearestDistance = Double.MAX_VALUE;
-        for (int i = 0; i < bodyCount; i++) {
+        for (int i = 0; i < visualBodyCount(); i++) {
             if (i == bodyIndex) {
                 continue;
             }
-            double dx = posX.get(i) - posX.get(bodyIndex);
-            double dy = posY.get(i) - posY.get(bodyIndex);
-            double dz = posZ.get(i) - posZ.get(bodyIndex);
+            double dx = visualPosX(i) - visualPosX(bodyIndex);
+            double dy = visualPosY(i) - visualPosY(bodyIndex);
+            double dz = visualPosZ(i) - visualPosZ(bodyIndex);
             double distance = Math.sqrt(dx * dx + dy * dy + dz * dz);
             if (distance < nearestDistance) {
                 nearestDistance = distance;
@@ -2082,8 +3200,8 @@ public class BodySimulator extends Application {
     }
 
     private int bodyAt(double screenX, double screenY) {
-        for (int i = bodyCount - 1; i >= 0; i--) {
-            double[] projected = projectPoint(posX.get(i), posY.get(i), posZ.get(i));
+        for (int i = visualBodyCount() - 1; i >= 0; i--) {
+            double[] projected = projectPoint(visualPosX(i), visualPosY(i), visualPosZ(i));
             double dx = screenX - projected[0];
             double dy = screenY - projected[1];
             if (Math.sqrt(dx * dx + dy * dy) <= bodyRadius(i) + 4.0) {
@@ -2099,18 +3217,25 @@ public class BodySimulator extends Application {
         }
 
         running = false;
+        stopSimulationWorker();
         pauseElapsedClock();
         int i = draggedBodyIndex;
         double[] world = screenToWorldAtViewDepth(screenX, screenY, draggedBodyViewDepth, viewScale);
-        posX.set(i, (float) world[0]);
-        posY.set(i, (float) world[1]);
-        posZ.set(i, (float) world[2]);
+        simulationLock.lock();
+        try {
+            posX.set(i, (float) world[0]);
+            posY.set(i, (float) world[1]);
+            posZ.set(i, (float) world[2]);
+            invalidateExecutionPlan();
+        } finally {
+            simulationLock.unlock();
+        }
         snapshotInitialState();
         updatePositionFields(i);
         clearTrails();
         clearFullTracks();
         clearPhotonPath();
-        invalidateExecutionPlan();
+        resetRenderSnapshots();
         draw();
         updateDashboard();
     }
@@ -2347,7 +3472,7 @@ public class BodySimulator extends Application {
     }
 
     private double[] screenToWorldAtViewDepth(double screenX, double screenY,
-                                               double viewDepth, double scale) {
+                                              double viewDepth, double scale) {
         return unprojectScreenAtViewDepth(
                 screenX, screenY, viewDepth,
                 viewCenterX, viewCenterY, viewCenterZ,
@@ -2432,17 +3557,18 @@ public class BodySimulator extends Application {
     }
 
     private void drawRotationIndicatorBodies(GraphicsContext gc, double centerX, double centerY) {
-        if (bodyCount == 0) {
+        int count = visualBodyCount();
+        if (count == 0) {
             return;
         }
         double worldRadius = Math.max(0.000001,
                 Math.hypot(canvas.getWidth(), canvas.getHeight()) * 0.5 / viewScale);
         double pixelsPerWorldUnit = Math.min(66.0, 40.0) / worldRadius;
-        for (int i = 0; i < bodyCount; i++) {
+        for (int i = 0; i < count; i++) {
             indicatorBodyOrder[i] = i;
-            worldToViewInto(posX.get(i), posY.get(i), posZ.get(i), indicatorViewPositions[i]);
+            worldToViewInto(visualPosX(i), visualPosY(i), visualPosZ(i), indicatorViewPositions[i]);
         }
-        for (int i = 1; i < bodyCount; i++) {
+        for (int i = 1; i < count; i++) {
             int bodyIndex = indicatorBodyOrder[i];
             int insertion = i;
             while (insertion > 0
@@ -2453,7 +3579,7 @@ public class BodySimulator extends Application {
             indicatorBodyOrder[insertion] = bodyIndex;
         }
 
-        for (int orderIndex = 0; orderIndex < bodyCount; orderIndex++) {
+        for (int orderIndex = 0; orderIndex < count; orderIndex++) {
             int bodyIndex = indicatorBodyOrder[orderIndex];
             double[] position = indicatorViewPositions[bodyIndex];
             double normalizedDepth = Math.clamp(position[2] / worldRadius, -1.0, 1.0);
@@ -2491,6 +3617,12 @@ public class BodySimulator extends Application {
 
     @Override
     public void stop() {
+        running = false;
+        stopSimulationWorker();
+        stopped = true;
+        if (gpuWarmupDebounceTimer != null) {
+            gpuWarmupDebounceTimer.stop();
+        }
         if (simulationTimer != null) {
             simulationTimer.stop();
             simulationTimer = null;
@@ -2502,7 +3634,57 @@ public class BodySimulator extends Application {
         hidePopover(guidePopover);
         hidePopover(unitDescriptionPopover);
         hidePopover(unitCalibrationPopover);
-        closeExecutionPlan();
+        simulationLock.lock();
+        try {
+            markWarmupDirty();
+            closeExecutionPlan();
+        } finally {
+            simulationLock.unlock();
+        }
+    }
+
+    private GridCacheTiming drawCachedGravityGrid(GraphicsContext gc, double width, double height) {
+        GridCacheTiming timing = refreshCachedGridImageIfNeeded(width, height);
+        if (cachedGridImage == null) {
+            drawGravityGrid(gc, width, height);
+            return timing;
+        }
+        gc.drawImage(cachedGridImage, 0.0, 0.0);
+        return timing;
+    }
+
+    private GridCacheTiming refreshCachedGridImageIfNeeded(double width, double height) {
+        if (!cachedGridImageDirty
+                && cachedGridImage != null
+                && Double.compare(cachedGridImageWidth, width) == 0
+                && Double.compare(cachedGridImageHeight, height) == 0) {
+            return new GridCacheTiming(0L, 0L);
+        }
+        if (width <= 0.0 || height <= 0.0) {
+            return new GridCacheTiming(0L, 0L);
+        }
+
+        Canvas gridCanvas = new Canvas(width, height);
+        GraphicsContext gridGraphics = gridCanvas.getGraphicsContext2D();
+        gridGraphics.setStroke(Color.rgb(27, 38, 58));
+        long rebuildStartNanos = System.nanoTime();
+        drawGravityGrid(gridGraphics, width, height);
+        long rebuildNanos = System.nanoTime() - rebuildStartNanos;
+
+        long snapshotStartNanos = System.nanoTime();
+        WritableImage reusableImage = cachedGridImage != null
+                && Double.compare(cachedGridImageWidth, width) == 0
+                && Double.compare(cachedGridImageHeight, height) == 0
+                ? cachedGridImage
+                : null;
+        SnapshotParameters snapshotParameters = new SnapshotParameters();
+        snapshotParameters.setFill(Color.TRANSPARENT);
+        cachedGridImage = gridCanvas.snapshot(snapshotParameters, reusableImage);
+        long snapshotNanos = System.nanoTime() - snapshotStartNanos;
+        cachedGridImageWidth = width;
+        cachedGridImageHeight = height;
+        cachedGridImageDirty = false;
+        return new GridCacheTiming(rebuildNanos, snapshotNanos);
     }
 
     private static void hidePopover(PopOver popover) {

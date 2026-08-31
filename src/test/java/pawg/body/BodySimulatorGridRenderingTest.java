@@ -140,6 +140,26 @@ class BodySimulatorGridRenderingTest {
         assertArrayEquals(before, zoomedIn, 1.0e-6);
     }
 
+    @Test
+    void cachedGridDoesNotCoverTheSimulationBackgroundWithWhite() throws Exception {
+        WritableImage rendered = onFxThread(() -> {
+            BodySimulator simulator = new BodySimulator();
+            Canvas canvas = new Canvas(160.0, 100.0);
+            setField(simulator, "canvas", canvas);
+            invokeDraw(simulator);
+            SnapshotParameters snapshotParameters = new SnapshotParameters();
+            snapshotParameters.setFill(Color.TRANSPARENT);
+            return canvas.snapshot(snapshotParameters, null);
+        });
+
+        Color background = rendered.getPixelReader().getColor(1, 1);
+        assertEquals(4.0 / 255.0, background.getRed(), 0.02);
+        assertEquals(6.0 / 255.0, background.getGreen(), 0.02);
+        assertEquals(12.0 / 255.0, background.getBlue(), 0.02);
+        assertTrue(background.getRed() < 0.1 && background.getGreen() < 0.1 && background.getBlue() < 0.1,
+                "cached grid image must preserve the dark simulation background");
+    }
+
     private static WritableImage renderGridSegment(float fromX, float toX) throws Exception {
         return onFxThread(() -> {
             BodySimulator simulator = new BodySimulator();
@@ -207,6 +227,12 @@ class BodySimulatorGridRenderingTest {
                 "rebuildGridGeometryIfNeeded", double.class, double.class);
         rebuild.setAccessible(true);
         rebuild.invoke(simulator, width, height);
+    }
+
+    private static void invokeDraw(BodySimulator simulator) throws Exception {
+        Method draw = BodySimulator.class.getDeclaredMethod("draw");
+        draw.setAccessible(true);
+        draw.invoke(simulator);
     }
 
     private static void assertFiniteGridPoints(BodySimulator simulator) throws Exception {
