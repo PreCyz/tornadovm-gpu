@@ -252,6 +252,11 @@ run.ps1                       local Windows/TornadoVM development launcher
 
 ## Implementing a change
 
+Practical best practices derived from the simulations in this repository are
+available in [JavaFX and TornadoVM Best Practices](best-practices.md). The guide
+includes project-based code examples for kernel design, transfer modes,
+device-to-host readback, and responsive JavaFX integration.
+
 1. **State the model first.** Record the governing laws, units, assumptions, numerical method, invariants, and acceptable error before changing a physics kernel.
 2. **Keep a correctness oracle.** Implement or preserve a deterministic CPU calculation for numerical checks. Compare GPU output with tolerances appropriate to floating-point order and precision.
 3. **Partition intentionally.** Put regular, high-volume, independent calculations on TornadoVM. Keep JavaFX scene-graph mutation, UI state, allocation-heavy work, and irregular orchestration on the CPU.

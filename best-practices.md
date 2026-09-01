@@ -3,6 +3,126 @@
 This guide summarizes the CPU/GPU split used in this project and the practices
 that kept the JavaFX simulations responsive while using TornadoVM.
 
+## Project-Based Code Examples
+
+The following abridged examples come from the current project. They show the
+patterns in isolation; follow the linked source files when changing the
+production implementation.
+
+### Write kernels as indexed data-parallel loops
+
+`BodyPhysicsKernels.updatePositions` keeps JavaFX objects and allocation out of
+the kernel. Each work item updates one body stored in TornadoVM arrays:
+
+```java
+static void updatePositions(
+        FloatArray px, FloatArray py, FloatArray pz,
+        FloatArray vx, FloatArray vy, FloatArray vz,
+        FloatArray ax, FloatArray ay, FloatArray az,
+        IntArray active, FloatArray params, IntArray state) {
+
+    float dt = params.get(1);
+    int count = state.get(0);
+
+    for (@Parallel int i = 0; i < count; i++) {
+        if (active.get(i) == 0) {
+            continue;
+        }
+        px.set(i, px.get(i) + vx.get(i) * dt
+                + 0.5f * ax.get(i) * dt * dt);
+        py.set(i, py.get(i) + vy.get(i) * dt
+                + 0.5f * ay.get(i) * dt * dt);
+        pz.set(i, pz.get(i) + vz.get(i) * dt
+                + 0.5f * az.get(i) * dt * dt);
+    }
+}
+```
+
+See [`BodyPhysicsKernels.java`](src/main/java/pawg/body/BodyPhysicsKernels.java).
+
+### Match transfer modes to data ownership
+
+The body simulator uploads structural simulation arrays when the plan is first
+executed, uploads runtime parameters on every step, and declares physical-state
+readback as on demand:
+
+```java
+TaskGraph graph = new TaskGraph("body-simulator")
+        .transferToDevice(DataTransferMode.FIRST_EXECUTION,
+                posX, posY, posZ, velX, velY, velZ,
+                accX, accY, accZ, mass, active, state)
+        .transferToDevice(DataTransferMode.EVERY_EXECUTION, params)
+        .task("current-acceleration",
+                BodyPhysicsKernels::computeAcceleration,
+                posX, posY, posZ, accX, accY, accZ,
+                mass, active, params, state)
+        .task("position-update",
+                BodyPhysicsKernels::updatePositions,
+                posX, posY, posZ, velX, velY, velZ,
+                accX, accY, accZ, active, params, state)
+        .transferToHost(DataTransferMode.UNDER_DEMAND,
+                posX, posY, posZ, velX, velY, velZ);
+
+TornadoExecutionPlan plan = new TornadoExecutionPlan(graph.snapshot());
+```
+
+This arrangement is suitable when topology changes invalidate the plan but
+small values such as timestep or softening may change between executions. In
+contrast, the interactive Game of Life uploads its editable grid with
+`EVERY_EXECUTION` so mouse edits reach the device. See
+[`BodySimulator.java`](src/main/java/pawg/body/BodySimulator.java) and
+[`GameOfLifeInteractive.java`](src/main/java/pawg/gameoflife/GameOfLifeInteractive.java).
+
+### Read device state only when a consumer needs it
+
+An `UNDER_DEMAND` declaration lets the worker execute several GPU steps without
+stalling for a host copy after every step. The body simulator requests a copy
+only at its configured render-snapshot cadence:
+
+```java
+TornadoExecutionResult result = executionPlan.execute();
+
+if (publishSnapshot) {
+    result.transferToHost(
+            posX, posY, posZ,
+            velX, velY, velZ,
+            accX, accY, accZ);
+    publishRenderSnapshot(System.nanoTime());
+}
+```
+
+The UI can then render the latest published snapshot instead of forcing every
+simulation step to synchronize with the host.
+
+### Keep execution off the JavaFX Application Thread
+
+The body simulator owns a daemon worker for plan rebuilds, GPU execution, and
+readback. Its critical section protects shared simulation state and ends before
+the JavaFX frame performs drawing or control updates:
+
+```java
+Thread worker = new Thread(() -> {
+    while (!stopRequested.get()) {
+        simulationLock.lock();
+        try {
+            rebuildPlanIfNeeded();
+            boolean publish = simulationStepCounter
+                    % RENDER_READBACK_INTERVAL_FRAMES == 0;
+            executeGpuStep(publish);
+        } finally {
+            simulationLock.unlock();
+        }
+        LockSupport.parkNanos(SIMULATION_STEP_INTERVAL_NANOS);
+    }
+}, "body-simulator-gpu-worker");
+worker.setDaemon(true);
+worker.start();
+```
+
+This is an abridged lifecycle example: the production worker also handles stop,
+pause, empty-state, collision-bridge, timing, and failure conditions. JavaFX
+node mutation must still occur on the JavaFX Application Thread.
+
 ## What Runs on the GPU
 
 ### Body Simulator
