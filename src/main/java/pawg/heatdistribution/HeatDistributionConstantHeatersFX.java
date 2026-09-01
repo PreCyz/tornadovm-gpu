@@ -113,14 +113,17 @@ public class HeatDistributionConstantHeatersFX extends Application {
                 .task("taskAtoB", HeatDistributionConstantHeatersFX::computeHeatStep, gridA, gridB, heatSourcesMask, DIM, ALPHA)
                 .task("renderB", HeatDistributionConstantHeatersFX::renderHeatPixels, gridB, pixelBuffer, DIM * DIM)
                 .transferToHost(DataTransferMode.EVERY_EXECUTION, gridB, pixelBuffer);
-        planAtoB = TornadoDeviceSelector.applyDevice(new TornadoExecutionPlan(tgAtoB.snapshot()), selectedTornadoDevice);
+        planAtoB = selectedTornadoDevice.map(it -> TornadoDeviceSelector.applyDevice(new TornadoExecutionPlan(tgAtoB.snapshot()), it))
+                .orElseGet(() -> new TornadoExecutionPlan(tgAtoB.snapshot()));
 
         TaskGraph tgBtoA = new TaskGraph("tgBtoA")
                 .transferToDevice(DataTransferMode.EVERY_EXECUTION, gridB, heatSourcesMask)
                 .task("taskBtoA", HeatDistributionConstantHeatersFX::computeHeatStep, gridB, gridA, heatSourcesMask, DIM, ALPHA)
                 .task("renderA", HeatDistributionConstantHeatersFX::renderHeatPixels, gridA, pixelBuffer, DIM * DIM)
                 .transferToHost(DataTransferMode.EVERY_EXECUTION, gridA, pixelBuffer);
-        planBtoA = TornadoDeviceSelector.applyDevice(new TornadoExecutionPlan(tgBtoA.snapshot()), selectedTornadoDevice);
+
+        planBtoA = selectedTornadoDevice.map(it -> TornadoDeviceSelector.applyDevice(new TornadoExecutionPlan(tgBtoA.snapshot()), it))
+                .orElseGet(() -> new TornadoExecutionPlan(tgBtoA.snapshot()));
 
         WritableImage writableImage = new WritableImage(DIM, DIM);
         pixelWriter = writableImage.getPixelWriter();

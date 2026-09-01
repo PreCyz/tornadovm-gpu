@@ -212,7 +212,7 @@ public class BodySimulator extends Application {
     private int appliedSnapshotStep;
     private int simulationStepCounter;
     private int lastDashboardFrame = -DASHBOARD_UPDATE_FRAMES;
-    private TornadoDevice selectedDevice;
+    private Optional<TornadoDevice> selectedDevice;
     private TornadoDeviceChoice selectedDeviceChoice;
     private volatile int bodyCount;
     private int initialBodyCount;
@@ -638,7 +638,7 @@ public class BodySimulator extends Application {
         running = true;
         resumeElapsedClock();
         publishRenderSnapshot(System.nanoTime());
-        if (!CPU_PHYSICS && selectedDevice != null) {
+        if (!CPU_PHYSICS && selectedDevice.isPresent()) {
             startSimulationWorker();
         }
         clearTrails();
@@ -1276,7 +1276,8 @@ public class BodySimulator extends Application {
                         posX, posY, posZ, velX, velY, velZ, accX, accY, accZ);
         TornadoExecutionPlan nextPlan = new TornadoExecutionPlan(graph.snapshot());
         try {
-            executionPlan = TornadoDeviceSelector.applyDevice(nextPlan, selectedDevice);
+            executionPlan = selectedDevice.map(device -> TornadoDeviceSelector.applyDevice(nextPlan, device))
+                    .orElse(nextPlan);
         } catch (RuntimeException | Error failure) {
             closePlanQuietly(nextPlan);
             throw failure;

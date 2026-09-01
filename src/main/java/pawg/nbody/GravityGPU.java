@@ -24,6 +24,7 @@ import uk.ac.manchester.tornado.api.types.arrays.FloatArray;
 import uk.ac.manchester.tornado.api.types.arrays.IntArray;
 
 import java.util.List;
+import java.util.Optional;
 
 public class GravityGPU extends Application {
 
@@ -212,7 +213,7 @@ public class GravityGPU extends Application {
     private TornadoExecutionPlan executionPlan;
     private TornadoExecutionPlan trailProjectionPlan;
     private TornadoDeviceChoice selectedDeviceChoice;
-    private TornadoDevice selectedTornadoDevice;
+    private Optional<TornadoDevice> selectedTornadoDevice;
     private boolean simulationPlanDirty = false;
     private boolean simulationPlanReady = false;
 
@@ -1871,11 +1872,8 @@ public class GravityGPU extends Application {
             }
 
             private void updateCellStyle() {
-                setStyle(isEmpty()
-                        ? ""
-                        : isHover()
-                                ? "-fx-background-color: #365f85;"
-                                : "-fx-background-color: #1b2533;");
+                String fxBgColorStyle = isHover() ? "-fx-background-color: #365f85;" : "-fx-background-color: #1b2533;";
+                setStyle(isEmpty() ? "" : fxBgColorStyle);
             }
         };
     }
@@ -1890,7 +1888,7 @@ public class GravityGPU extends Application {
     }
 
     private TornadoExecutionPlan applySelectedTornadoDevice(TornadoExecutionPlan plan) {
-        return TornadoDeviceSelector.applyDevice(plan, selectedTornadoDevice);
+        return selectedTornadoDevice.map(it -> TornadoDeviceSelector.applyDevice(plan, it)).orElse(plan);
     }
 
     private void warmUpTornadoPlans() {

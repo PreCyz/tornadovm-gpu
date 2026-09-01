@@ -24,7 +24,7 @@ public final class TornadoDeviceSelector {
     public static final String INHERITED_DEVICE_PROPERTY = "tornado.device.selector.inherited";
     private static final Pattern DEVICE_ID_PATTERN = Pattern.compile("^(0|[1-9]\\d*):(0|[1-9]\\d*)$");
 
-    public static TornadoDevice selectDevice(Stage owner) {
+    public static Optional<TornadoDevice> selectDevice(Stage owner) {
         List<TornadoDeviceChoice> devices = deviceChoices();
         Optional<TornadoDeviceChoice> inheritedChoice = inheritedDeviceChoice(devices);
         if (hasInheritedDeviceProperty()) {
@@ -62,7 +62,7 @@ public final class TornadoDeviceSelector {
                 .orElse(devices.getFirst());
     }
 
-    public static TornadoDevice resolveDevice(Stage owner, TornadoDeviceChoice choice) {
+    public static Optional<TornadoDevice> resolveDevice(Stage owner, TornadoDeviceChoice choice) {
         return resolveDevice(owner, choice, true);
     }
 
@@ -96,18 +96,18 @@ public final class TornadoDeviceSelector {
         return System.getProperty(INHERITED_DEVICE_PROPERTY) != null;
     }
 
-    private static TornadoDevice resolveDevice(Stage owner, TornadoDeviceChoice choice, boolean showFailureAlert) {
+    private static Optional<TornadoDevice> resolveDevice(Stage owner, TornadoDeviceChoice choice, boolean showFailureAlert) {
         if (choice == null) {
-            return null;
+            return Optional.empty();
         }
         try {
-            return TornadoExecutionPlan.getDevice(choice.driverIndex(), choice.deviceIndex());
+            return Optional.of(TornadoExecutionPlan.getDevice(choice.driverIndex(), choice.deviceIndex()));
         } catch (RuntimeException e) {
             String message = "Could not select Tornado device " + choice.tornadoDeviceId()
                     + "; the simulation will use TornadoVM's default device. " + e.getMessage();
             if (!showFailureAlert) {
                 System.err.println(message);
-                return null;
+                return Optional.empty();
             }
             Alert alert = new Alert(Alert.AlertType.WARNING);
             alert.setTitle("TornadoVM Device");
@@ -117,7 +117,7 @@ public final class TornadoDeviceSelector {
                 alert.initOwner(owner);
             }
             alert.showAndWait();
-            return null;
+            return Optional.empty();
         }
     }
 
@@ -134,7 +134,7 @@ public final class TornadoDeviceSelector {
             return Optional.of(new DeviceIndices(
                     Integer.parseInt(matcher.group(1)),
                     Integer.parseInt(matcher.group(2))));
-        } catch (NumberFormatException ignored) {
+        } catch (NumberFormatException _) {
             return Optional.empty();
         }
     }

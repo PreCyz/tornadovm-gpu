@@ -100,6 +100,10 @@ public final class LauncherWindow extends Application {
         }
         setButtonsDisabled(true);
         String selectedDevice = target.gpuTarget() ? TornadoDeviceSelector.encodeDeviceChoice(choice) : null;
+        startDeviceSelection(target, selectedDevice);
+    }
+
+    private void startDeviceSelection(SimulationTarget target, String selectedDevice) {
         Task<Process> task = new Task<>() {
             @Override
             protected Process call() throws Exception {
@@ -111,9 +115,7 @@ public final class LauncherWindow extends Application {
             setButtonsDisabled(false);
             showError("Could not start " + target.label(), task.getException());
         });
-        Thread thread = new Thread(task, "simulation-child-start");
-        thread.setDaemon(true);
-        thread.start();
+        Thread.ofPlatform().daemon().name("simulation-child-start").start(task);
     }
 
     private void waitForChildStart(Process child) {
@@ -166,7 +168,7 @@ public final class LauncherWindow extends Application {
             Class<?> bootstrapFx = Class.forName("org.kordamp.bootstrapfx.BootstrapFX");
             Method method = bootstrapFx.getMethod("bootstrapFXStylesheet");
             return (String) method.invoke(null);
-        } catch (ReflectiveOperationException | LinkageError unavailable) {
+        } catch (ReflectiveOperationException | LinkageError _) {
             return "data:text/css," + URLEncoder.encode(FALLBACK_STYLESHEET, StandardCharsets.UTF_8);
         }
     }

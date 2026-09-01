@@ -103,14 +103,16 @@ public class HeatDistributionFX extends Application {
                 .task("taskAtoB", HeatDistributionFX::computeHeatStep, gridA, gridB, DIM, ALPHA)
                 .task("renderB", HeatDistributionFX::renderHeatPixels, gridB, pixelBuffer, DIM * DIM)
                 .transferToHost(DataTransferMode.EVERY_EXECUTION, gridB, pixelBuffer);
-        planAtoB = TornadoDeviceSelector.applyDevice(new TornadoExecutionPlan(tgAtoB.snapshot()), selectedTornadoDevice);
+        planAtoB = selectedTornadoDevice.map(it -> TornadoDeviceSelector.applyDevice(new TornadoExecutionPlan(tgAtoB.snapshot()), it))
+                .orElseGet(() -> new TornadoExecutionPlan(tgAtoB.snapshot()));
 
         TaskGraph tgBtoA = new TaskGraph("tgBtoA")
                 .transferToDevice(DataTransferMode.EVERY_EXECUTION, gridB)
                 .task("taskBtoA", HeatDistributionFX::computeHeatStep, gridB, gridA, DIM, ALPHA)
                 .task("renderA", HeatDistributionFX::renderHeatPixels, gridA, pixelBuffer, DIM * DIM)
                 .transferToHost(DataTransferMode.EVERY_EXECUTION, gridA, pixelBuffer);
-        planBtoA = TornadoDeviceSelector.applyDevice(new TornadoExecutionPlan(tgBtoA.snapshot()), selectedTornadoDevice);
+        planBtoA = selectedTornadoDevice.map(it -> TornadoDeviceSelector.applyDevice(new TornadoExecutionPlan(tgBtoA.snapshot()), it))
+                .orElseGet(() -> new TornadoExecutionPlan(tgBtoA.snapshot()));
 
         WritableImage writableImage = new WritableImage(DIM, DIM);
         pixelWriter = writableImage.getPixelWriter();

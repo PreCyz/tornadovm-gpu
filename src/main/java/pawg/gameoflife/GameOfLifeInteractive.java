@@ -56,7 +56,8 @@ public class GameOfLifeInteractive extends Application {
                 .task("render", GameOfLifeKernel::renderCells, gridA, pixelBuffer, SIZE, COLOR_ALIVE, COLOR_DEAD)
                 .transferToHost(DataTransferMode.EVERY_EXECUTION, gridA, pixelBuffer);
 
-        executionPlan = TornadoDeviceSelector.applyDevice(new TornadoExecutionPlan(taskGraph.snapshot()), selectedTornadoDevice);
+        executionPlan = selectedTornadoDevice.map(it -> TornadoDeviceSelector.applyDevice(new TornadoExecutionPlan(taskGraph.snapshot()), it))
+                .orElseGet(() -> new TornadoExecutionPlan(taskGraph.snapshot()));
 
         createFxView(primaryStage);
     }

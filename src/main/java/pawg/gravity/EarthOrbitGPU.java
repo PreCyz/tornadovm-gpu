@@ -120,7 +120,8 @@ public class EarthOrbitGPU extends Application {
                 .transferToHost(DataTransferMode.EVERY_EXECUTION, pixelBuffer);
 
         ImmutableTaskGraph immutableTaskGraph = taskGraph.snapshot();
-        executionPlan = TornadoDeviceSelector.applyDevice(new TornadoExecutionPlan(immutableTaskGraph), selectedTornadoDevice);
+        executionPlan = selectedTornadoDevice.map(it -> TornadoDeviceSelector.applyDevice(new TornadoExecutionPlan(immutableTaskGraph), it))
+                .orElseGet(() -> new TornadoExecutionPlan(immutableTaskGraph));
 
         WritableImage writableImage = new WritableImage(WIDTH, HEIGHT);
         pixelWriter = writableImage.getPixelWriter();

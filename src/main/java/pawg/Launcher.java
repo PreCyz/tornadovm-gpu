@@ -38,7 +38,7 @@ public class Launcher {
         try {
             Class.forName("org.kordamp.bootstrapfx.BootstrapFX", false, Launcher.class.getClassLoader());
             return true;
-        } catch (ClassNotFoundException | LinkageError unavailable) {
+        } catch (ClassNotFoundException | LinkageError _) {
             return false;
         }
     }

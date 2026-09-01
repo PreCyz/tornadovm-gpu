@@ -134,14 +134,14 @@ public final class ChildJvmLauncher {
             Path argumentFile = Path.of(argument.substring(1));
             Path fileName = argumentFile.getFileName();
             return fileName != null && fileName.toString().equalsIgnoreCase("tornado-argfile");
-        } catch (RuntimeException invalidPath) {
+        } catch (RuntimeException _) {
             return false;
         }
     }
 
     private static boolean isAllowedTornadoAgent(String argument, Map<String, String> environment) {
-        Path tornadoHome = configuredTornadoHome(environment);
-        if (tornadoHome == null) {
+        Optional<Path> tornadoHome = configuredTornadoHome(environment);
+        if (tornadoHome.isEmpty()) {
             return false;
         }
         String agentDefinition = argument.substring("-javaagent:".length());
@@ -149,35 +149,35 @@ public final class ChildJvmLauncher {
         String agentPathText = optionsSeparator < 0 ? agentDefinition : agentDefinition.substring(0, optionsSeparator);
         try {
             Path agentPath = Path.of(agentPathText);
-            if (!Files.exists(agentPath) || !Files.exists(tornadoHome)) {
+            if (!Files.exists(agentPath) || !Files.exists(tornadoHome.get())) {
                 return false;
             }
-            return agentPath.toRealPath().startsWith(tornadoHome.toRealPath());
-        } catch (IOException | RuntimeException invalidPath) {
+            return agentPath.toRealPath().startsWith(tornadoHome.get().toRealPath());
+        } catch (IOException | RuntimeException _) {
             return false;
         }
     }
 
-    private static Path configuredTornadoHome(Map<String, String> environment) {
+    private static Optional<Path> configuredTornadoHome(Map<String, String> environment) {
         if (environment == null) {
-            return null;
+            return Optional.empty();
         }
         String configuredHome = environment.get("TORNADOVM_HOME");
         if (configuredHome == null || configuredHome.isBlank()) {
             configuredHome = environment.get("TORNADO_HOME");
         }
         if (configuredHome == null || configuredHome.isBlank()) {
-            return null;
+            return Optional.empty();
         }
         try {
-            return Path.of(configuredHome).toAbsolutePath().normalize();
-        } catch (RuntimeException invalidPath) {
-            return null;
+            return Optional.of(Path.of(configuredHome).toAbsolutePath().normalize());
+        } catch (RuntimeException _) {
+            return Optional.empty();
         }
     }
 
     static String validatedDevice(String selectedDevice) {
-        if (selectedDevice == null || !selectedDevice.matches("[0-9]+:[0-9]+")) {
+        if (selectedDevice == null || !selectedDevice.matches("\\d+:\\d+")) {
             throw new IllegalArgumentException("GPU device must use non-negative driver:device coordinates");
         }
         String[] coordinates = selectedDevice.split(":", -1);
